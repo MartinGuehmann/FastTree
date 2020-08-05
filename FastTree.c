@@ -319,7 +319,7 @@
 #define IS_ALIGNED(X) 1
 #endif
 
-#define FT_VERSION "2.1.5"
+#define FT_VERSION "2.1.6"
 
 char *usage =
   "  FastTree protein_alignment > tree\n"
@@ -6804,7 +6804,8 @@ void UpdateBranchLengths(/*IN/OUT*/NJ_t *NJ) {
 
 /* Pick columns for resampling, stored as returned_vector[iBoot*nPos + j] */
 int *ResampleColumns(int nPos, int nBootstrap) {
-  int *col = (int*)mymalloc(sizeof(int)*nPos*nBootstrap);
+  long lPos = nPos; /* to prevent overflow on very long alignments when multiplying nPos * nBootstrap */
+  int *col = (int*)mymalloc(sizeof(int)*lPos*(size_t)nBootstrap);
   int i;
   for (i = 0; i < nBootstrap; i++) {
     int j;
@@ -6814,7 +6815,7 @@ int *ResampleColumns(int nPos, int nBootstrap) {
 	pos = 0;
       else if (pos == nPos)
 	pos = nPos-1;
-      col[i*nPos + j] = pos;
+      col[i*lPos + j] = pos;
     }
   }
   if (verbose > 5) {
@@ -6822,7 +6823,7 @@ int *ResampleColumns(int nPos, int nBootstrap) {
       fprintf(stderr,"Boot%d",i);
       int j;
       for (j = 0; j < nPos; j++) {
-	fprintf(stderr,"\t%d",col[i*nPos+j]);
+	fprintf(stderr,"\t%d",col[i*lPos+j]);
       }
       fprintf(stderr,"\n");
     }
@@ -6874,7 +6875,7 @@ void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ, int nBootstrap) {
   }
   traversal = FreeTraversal(traversal,NJ);
   upProfiles = FreeUpProfiles(upProfiles,NJ);
-  col = myfree(col, sizeof(int)*NJ->nPos*nBootstrap);
+  col = myfree(col, sizeof(int)*((size_t)NJ->nPos)*nBootstrap);
 }
 
 profile_t *NewProfile(int nPos, int nConstraints) {
@@ -7109,7 +7110,7 @@ void TestSplitsML(/*IN/OUT*/NJ_t *NJ, /*OUT*/SplitCount_t *splitcount, int nBoot
   traversal = FreeTraversal(traversal,NJ);
   upProfiles = FreeUpProfiles(upProfiles,NJ);
   if (nBootstrap>0)
-    col = myfree(col, sizeof(int)*NJ->nPos*nBootstrap);
+    col = myfree(col, sizeof(int)*((size_t)NJ->nPos)*nBootstrap);
   for (choice = 0; choice < 3; choice++)
     site_likelihoods[choice] = myfree(site_likelihoods[choice], sizeof(double)*NJ->nPos);
 }
@@ -7238,6 +7239,7 @@ double SplitSupport(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
 		    int nBootstrap,
 		    int *col) {
   int i,j;
+  long lPos = nPos; 		/* to avoid overflow when multiplying */
 
   /* Note distpieces are weighted */
   double *distpieces[6];
@@ -7306,7 +7308,7 @@ double SplitSupport(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
 
   int iBoot;
   for (iBoot=0;iBoot<nBootstrap;iBoot++) {
-    int *colw = &col[nPos*iBoot];
+    int *colw = &col[lPos*iBoot];
 
     for (j = 0; j < 6; j++) {
       double totp = 0;
@@ -7336,6 +7338,7 @@ double SplitSupport(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
 }
 
 double SHSupport(int nPos, int nBootstrap, int *col, double loglk[3], double *site_likelihoods[3]) {
+  long lPos = nPos;		/* to avoid overflow when multiplying */
   assert(nBootstrap>0);
   double delta1 = loglk[0]-loglk[1];
   double delta2 = loglk[0]-loglk[2];
@@ -7356,7 +7359,7 @@ double SHSupport(int nPos, int nBootstrap, int *col, double loglk[3], double *si
     for (i = 0; i < 3; i++)
       resampled[i] = -loglk[i];
     for (j = 0; j < nPos; j++) {
-      int pos = col[iBoot*nPos+j];
+      int pos = col[iBoot*lPos+j];
       for (i = 0; i < 3; i++)
 	resampled[i] += siteloglk[i][pos];
     }
