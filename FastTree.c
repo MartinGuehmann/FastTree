@@ -1,11 +1,14 @@
- /*
+/*
  * FastTree -- inferring approximately-maximum-likelihood trees for large
  * multiple sequence alignments.
  *
  * Morgan N. Price, 2008-2009
  * http://www.microbesonline.org/fasttree/
  *
- *  Copyright (C) 2008 The Regents of the University of California
+ * Thanks to Jim Hester of the Cleveland Clinic Foundation for
+ * providing the first parallel (OpenMP) code
+ *
+ *  Copyright (C) 2008-2009 The Regents of the University of California
  *  All rights reserved.
  *
  *  This program is free software; you can redistribute it and/or modify
@@ -36,11 +39,14 @@
 /*
  * To compile FastTree, do:
  * gcc -Wall -O3 -finline-functions -funroll-loops -o FastTree -lm FastTree.c
- * Use -DTRACK_MEMORY if you want it to report its memory usage,
- * but results are not correct above 4GB because mallinfo stores int values
  * Use -DNO_SSE to turn off use of SSE3 instructions
  *  (should not be necessary because compiler should not set __SSE__ if
  *  not available, and modern mallocs should return 16-byte-aligned values)
+ * Use -DOPENMP -fopenmp to use multiple threads (note, old versions of gcc
+ *   may not support -fopenmp)
+ * Use -DTRACK_MEMORY if you want detailed reports of memory usage,
+ * but results are not correct above 4GB because mallinfo stores int values.
+ * It also makes FastTree run significantly slower.
  *
  * To get usage guidance, do:
  * FastTree -help
@@ -130,6 +136,7 @@
  * O(L*N*a*log(N)) work to do the local search, where log(N)
  *	is a pessimistic estimate of the number of iterations. In
  *      practice, we average <1 iteration for 2,000 sequences.
+ *      With -fastest, this step is omitted.
  * O(N*a) work to compute the joined profile and update the out-profile
  * O(L*N*a) work to update the out-distances
  * O(L*N*a) work to compare the joined profile to the other nodes
@@ -228,6 +235,51 @@
  * do O(sqrt(N)) work to update the top-visible list.)
  * These udpates are not common so they do not alter the
  * O(N sqrt(N) log(N) L a) total running time for the joining phase.
+ *
+ * Second-level top hits
+ *
+ * With -fastest or with -2nd, FastTree uses an additional "2nd-level" top hits
+ * heuristic to reduce the running time for the top-hits phase to
+ * O(N**1.25 L) and for the neighbor-joining phase to O(N**1.25 L a).
+ * This also reduces the memory usage for the top-hits lists to
+ * O(N**1.25), which is important for alignments with a million
+ * sequences. The key idea is to store just q = sqrt(m) top hits for
+ * most sequences.
+ *
+ * Given the neighbors of A -- either for a seed or for a neighbor
+ * from the top-hits heuristic, if B is within the top q hits of A, we
+ * set top-hits(B) from the top 3*q top-hits of A. And, we record that
+ * A is the "source" of the hits for B, so if we run low on hits for
+ * B, instead of doing a full refresh, we can do top-hits(B) :=
+ * top-hits(B) union top-hits(active_ancestor(A)).
+ * During a refresh, these "2nd-level" top hits are updated just as
+ * normal, but the source is maintained and only q entries are stored,
+ * until we near the end of the neighbor joining phase (until the
+ * root as 2*m children or less).
+ *
+ * Parallel execution with OpenMP
+ *
+ * If you compile FastTree with OpenMP support, it will take
+ * advantage of multiple CPUs on one machine. It will parallelize:
+ *
+ * The top hits phase
+ * Comparing one node to many others during the NJ phase (the simplest kind of join)
+ * The refresh phase
+ * Optimizing likelihoods for 3 alternate topologies during ML NNIs and ML supports
+ * (only 3 threads can be used)
+ *
+ * This accounts for most of the O(N L a) or slower steps except for
+ * minimum-evolution NNIs (which are fast anyway), minimum-evolution SPRs,
+ * selecting per-site rates, and optimizing branch lengths outside of ML NNIs.
+ *
+ * Parallelizing the top hits phase may lead to a slight change in the tree,
+ * as some top hits are computed from different (and potentially less optimal source).
+ * This means that results on repeated runs may not be 100% identical.
+ * However, this should not have any significant effect on tree quality
+ * after the NNIs and SPRs.
+ *
+ * The OpenMP code also turns off the star-topology test during ML
+ * NNIs, which may lead to slight improvements in likelihood.
  */
 
 #include <stdio.h>
@@ -236,12 +288,16 @@
 #include <assert.h>
 #include <math.h>
 #include <stdlib.h>
-#include <time.h>
+#include <sys/time.h>
 #include <ctype.h>
 #include <unistd.h>
 #ifdef TRACK_MEMORY
 /* malloc.h apparently doesn't exist on MacOS */
 #include <malloc.h>
+#endif
+
+#ifdef OPENMP
+#include <omp.h>
 #endif
 
 #ifdef __SSE__
@@ -261,7 +317,7 @@
 #define IS_ALIGNED(X) 1
 #endif
 
-#define FT_VERSION "2.0.1"
+#define FT_VERSION "2.1.0"
 
 char *usage =
   "  FastTree protein_alignment > tree\n"
@@ -273,7 +329,7 @@ char *usage =
   "  -quiet to suppress reporting information\n"
   "  -nopr to suppress progress indicator\n"
   "  -log logfile -- save intermediate trees, settings, and model details\n"
-  "  -fastest -- speed up the neighbor joining phase\n"
+  "  -fastest -- speed up the neighbor joining phase & reduce memory usage\n"
   "        (recommended for >50,000 sequences)\n"
   "  -n <number> to analyze multiple alignments (phylip format only)\n"
   "        (use for global bootstrap, with seqboot and CompareToBootstrap.pl)\n"
@@ -289,6 +345,8 @@ char *usage =
   "  -nome -mllen with -intree to optimize branch lengths for a fixed topology\n"
   "  -cat # to specify the number of rate categories of sites (default 20)\n"
   "      or -nocat to use constant rates\n"
+  "  -gamma -- after optimizing the tree under the CAT approximation,\n"
+  "      rescale the lengths to optimize the Gamma20 likelihood\n"
   "  -constraints constraintAlignment to constrain the topology search\n"
   "       constraintAlignment should have 1s or 0s to indicates splits\n"
   "  -expert -- see more options\n"
@@ -299,8 +357,8 @@ char *expertUsage =
   "           [-intree starting_trees_file | -intree1 starting_tree_file]\n"
   "           [-quiet | -nopr]\n"
   "           [-nni 10] [-spr 2] [-noml | -mllen | -mlnni 10]\n"
-  "           [-mlacc 2] [-cat 20 | -nocat]\n"
-  "           [-slow | -fastest] [-slownni] [-seed 1253] \n"
+  "           [-mlacc 2] [-cat 20 | -nocat] [-gamma]\n"
+  "           [-slow | -fastest] [-2nd | -no2nd] [-slownni] [-seed 1253] \n"
   "           [-top | -notop] [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
   "           [-matrix Matrix | -nomatrix] [-nj | -bionj]\n"
   "           [-nt] [-gtr] [-gtrrates ac ag at cg ct gt] [-gtrfreq fA fC fG fT]\n"
@@ -367,6 +425,13 @@ char *expertUsage =
   "  -gtr -- generalized time-reversible instead of (default) Jukes-Cantor (nt only)\n"
   "  -cat # -- specify the number of rate categories of sites (default 20)\n"
   "  -nocat -- no CAT model (just 1 category)\n"
+  "  -gamma -- after the final round of optimizing branch lengths with the CAT model,\n"
+  "            report the likelihood under the discrete gamma model with the same\n"
+  "            number of categories. FastTree uses the same branch lengths but\n"
+  "            optimizes the gamma shape parameter and the scale of the lengths.\n"
+  "            The final tree will have rescaled lengths. Used with -log, this\n"
+  "            also generates per-site likelihoods for use with CONSEL, see\n"
+  "            GammaLogToPaup.pl and documentation on the FastTree web site.\n"
   "\n"
   "Support value options:\n"
   "  By default, FastTree computes local support values by resampling the site\n"
@@ -385,8 +450,8 @@ char *expertUsage =
   "  -fastest -- search the visible set (the top hit for each node) only\n"
   "      Unlike the original fast neighbor-joining, -fastest updates visible(C)\n"
   "      after joining A and B if join(AB,C) is better than join(C,visible(C))\n"
-  "      -fastest also updates out-distances in a very lazy way\n"
-  "      -fastest also sets top-hits (-close & -refresh) to be more aggressive\n"
+  "      -fastest also updates out-distances in a very lazy way,\n"
+  "      -fastest sets -2nd on as well, use -fastest -no2nd to avoid this\n"
   "\n"
   "Top-hit heuristics:\n"
   "  By default, FastTree uses a top-hit list to speed up search\n"
@@ -402,6 +467,10 @@ char *expertUsage =
   "  -refresh 0.8 -- compare a joined node to all other nodes if its\n"
   "         top-hit list is less than 80% of the desired length,\n"
   "         or if the age of the top-hit list is log2(m) or greater\n"
+  "   -2nd or -no2nd to turn 2nd-level top hits heuristic on or off\n"
+  "      This reduces memory usage and running time but may lead to\n"
+  "      marginal reductions in tree quality.\n"
+  "      (By default, -fastest turns on -2nd.)\n"
   "\n"
   "Join options:\n"
   "  -nj: regular (unweighted) neighbor-joining (default)\n"
@@ -477,7 +546,10 @@ typedef struct {
 */
 typedef struct {
   int i, j;
-  float weight;			/* Total product of weights (maximum value is nPos) */
+  float weight;			/* Total product of weights (maximum value is nPos)
+				   This is needed for weighted joins and for pseudocounts,
+				   but not in most other places.
+				   For example, it is not maintained by the top hits code */
   float dist;			/* The uncorrected distance (includes diameter correction) */
   float criterion;		/* changes when we update the out-profile or change nActive */
 } besthit_t;
@@ -648,16 +720,66 @@ typedef struct {
   double deltaLength;		/* change in tree length for this step (lower is better) */
 } spr_step_t;
 
+/* Keep track of hits for the top-hits heuristic without wasting memory
+   j = -1 means empty
+   If j is an inactive node, this may be replaced by that node's parent (and dist recomputed)
+ */
+typedef struct {
+  int j;
+  float dist;
+} hit_t;
+
+typedef struct {
+  int nHits;			/* the allocated and desired size; some of them may be empty */
+  hit_t *hits;
+  int hitSource;		/* where to refresh hits from if a 2nd-level top-hit list, or -1 */
+  int age;			/* number of joins since a refresh */
+} top_hits_list_t;
+
+typedef struct {
+  int m;			 /* size of a full top hits list, usually sqrt(N) */
+  int q;			 /* size of a 2nd-level top hits, usually sqrt(m) */
+  int maxnodes;
+  top_hits_list_t *top_hits_lists; /* one per node */
+  hit_t *visible;		/* the "visible" (very best) hit for each node */
+
+  /* The top-visible set is a subset, usually of size m, of the visible set --
+     it is the set of joins to select from
+     Each entry is either a node whose visible set entry has a good (low) criterion,
+     or -1 for empty, or is an obsolete node (which is effectively the same).
+     Whenever we update the visible set, should also call UpdateTopVisible()
+     which ensures that none of the topvisible set are stale (that is, they
+     all point to an active node).
+  */
+  int nTopVisible;		/* nTopVisible = m * topvisibleMult */
+  int *topvisible;
+
+  int topvisibleAge;		/* joins since the top-visible list was recomputed */
+
+#ifdef OPENMP
+  /* 1 lock to read or write any top hits list, no thread grabs more than one */
+  omp_lock_t *locks;
+#endif
+} top_hits_t;
+
 /* Global variables */
 /* Options */
 int verbose = 1;
 int showProgress = 1;
 int slow = 0;
 int fastest = 0;
+bool useTopHits2nd = false;	/* use the second-level top hits heuristic? */
 int bionj = 0;
 double tophitsMult = 1.0;	/* 0 means compare nodes to all other nodes */
 double tophitsClose = -1.0;	/* Parameter for how close is close; also used as a coverage req. */
+double topvisibleMult = 1.5;	/* nTopVisible = m * topvisibleMult; 1 or 2 did not make much difference
+				   in either running time or accuracy so I chose a compromise. */
+
 double tophitsRefresh = 0.8;	/* Refresh if fraction of top-hit-length drops to this */
+double tophits2Mult = 1.0;	/* Second-level top heuristic -- only with -fastest */
+int tophits2Safety = 3;		/* Safety factor for second level of top-hits heuristic */
+double tophits2Refresh = 0.6;	/* Refresh 2nd-level top hits if drops down to this fraction of length */
+
 double staleOutLimit = 0.01;	/* nActive changes by at most this amount before we recompute 
 				   an out-distance. (Only applies if using the top-hits heuristic) */
 double fResetOutProfile = 0.02;	/* Recompute out profile from scratch if nActive has changed
@@ -678,6 +800,7 @@ double constraintWeight = 100.0;/* Cost of violation of a topological constraint
 double MEMinDelta = 1.0e-4;	/* Changes of less than this in tree-length are discounted for
 				   purposes of identifying fixed subtrees */
 bool fastNNI = true;
+bool gammaLogLk = false;	/* compute gamma likelihood without reoptimizing branch lengths? */
 
 /* Maximum likelihood options and constants */
 const double LkUnderflow = 1.0e-4;
@@ -703,10 +826,11 @@ long profileOps = 0;		/* Full profile-based distance operations */
 long outprofileOps = 0;		/* How many of profileOps are comparisons to outprofile */
 long seqOps = 0;		/* Faster leaf-based distance operations */
 long profileAvgOps = 0;		/* Number of profile-average steps */
-long nBetter = 0;		/* Number of hill-climbing steps */
+long nHillBetter = 0;		/* Number of hill-climbing steps */
 long nCloseUsed = 0;		/* Number of "close" neighbors we avoid full search for */
+long nClose2Used = 0;		/* Number of "close" neighbors we use 2nd-level top hits for */
 long nRefreshTopHits = 0;	/* Number of full-blown searches (interior nodes) */
-long nVisibleReset = 0;		/* Number of resets of the visible set */
+long nVisibleUpdate = 0;		/* Number of updates of the visible set */
 long nNNI = 0;			/* Number of NNI changes performed */
 long nSPR = 0;			/* Number of SPR changes performed */
 long nML_NNI = 0;		/* Number of max-lik. NNI changes performed */
@@ -735,6 +859,7 @@ void ReadMatrix(char *filename, /*OUT*/float codes[MAXCODES][MAXCODES], bool che
 void ReadVector(char *filename, /*OUT*/float codes[MAXCODES]);
 alignment_t *ReadAlignment(/*READ*/FILE *fp); /* Returns a list of strings (exits on failure) */
 alignment_t *FreeAlignment(alignment_t *); /* returns NULL */
+void FreeAlignmentSeqs(/*IN/OUT*/alignment_t *);
 
 /* Takes as input the transpose of the matrix V, with i -> j
    This routine takes care of setting the diagonals
@@ -808,6 +933,8 @@ int *ResampleColumns(int nPos, int nBootstrap);
 
 /* Use out-profile and NJ->totdiam to recompute out-distance for node iNode
    Only does this computation if the out-distance is "stale" (nOutDistActive[iNode] != nActive)
+   Note "IN/UPDATE" for NJ always means that we may update out-distances but otherwise
+   make no changes.
  */
 void SetOutDistance(/*IN/UPDATE*/NJ_t *NJ, int iNode, int nActive);
 
@@ -817,6 +944,29 @@ void SetOutDistance(/*IN/UPDATE*/NJ_t *NJ, int iNode, int nActive);
 */
 void SetCriterion(/*IN/UPDATE*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join);
 
+/* Computes weight and distance (which includes the constraint penalty)
+   and then sets the criterion (maybe update out-distances)
+*/
+void SetDistCriterion(/*IN/UPDATE*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join);
+
+/* If join->i or join->j are inactive nodes, replaces them with their active ancestors.
+   After doing this, if i == j, or either is -1, sets weight to 0 and dist and criterion to 1e20
+      and returns false (not a valid join)
+   Otherwise, if i or j changed, recomputes the distance and criterion.
+   Note that if i and j are unchanged then the criterion could be stale
+   If bUpdateDist is false, and i or j change, then it just sets dist to a negative number
+*/
+bool UpdateBestHit(/*IN/UPDATE*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join,
+		   bool bUpdateDist);
+
+/* This recomputes the criterion, or returns false if the visible node
+   is no longer active.
+*/
+bool GetVisible(/*IN/UPDATE*/NJ_t *NJ, int nActive, /*IN/OUT*/top_hits_t *tophits,
+		int iNode, /*OUT*/besthit_t *visible);
+
+int ActiveAncestor(/*IN*/NJ_t *NJ, int node);
+
 /* Compute the constraint penalty for a join. This is added to the "distance"
    by SetCriterion */
 int JoinConstraintPenalty(/*IN*/NJ_t *NJ, int node1, int node2);
@@ -825,11 +975,6 @@ int JoinConstraintPenaltyPiece(NJ_t *NJ, int node1, int node2, int iConstraint);
 /* Helper function for computing the number of constraints violated by
    a split, represented as counts of on and off on each side */
 int SplitConstraintPenalty(int nOn1, int nOff1, int nOn2, int nOff2);
-
-/* Computes weight and distance (which includes the constraint penalty)
-   and then sets the criterion (maybe update out-distances)
-*/
-void SetDistCriterion(/*IN/UPDATE*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join);
 
 /* Reports the (min. evo.) support for the (1,2) vs. (3,4) split
    col[iBoot*nPos+j] is column j for bootstrap iBoot
@@ -985,58 +1130,54 @@ void ExhaustiveNJSearch(NJ_t *NJ, int nActive, /*OUT*/besthit_t *bestjoin);
 /* Searches the visible set */
 void FastNJSearch(NJ_t *NJ, int nActive, /*UPDATE*/besthit_t *visible, /*OUT*/besthit_t *bestjoin);
 
-/* Subroutines for handling the tophits heuristic
-   NJ may be modified because of updating of out-distances
-*/
+/* Subroutines for handling the tophits heuristic */
 
-/* Before we do any joins -- sets tophits */
-void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits);
+top_hits_t *InitTopHits(NJ_t *NJ, int m);
+top_hits_t *FreeTopHits(top_hits_t *tophits); /* returns NULL */
 
-/* Find the best join to do.  topvisible is a list of active nodes (or
-   -1) that stores the m known joins. If it shrinks
-   to m/2 active entries then TopHitNJSearch will recompute it.
-*/
+/* Before we do any joins -- sets tophits and visible
+   NJ may be modified by setting out-distances
+ */
+void SetAllLeafTopHits(/*IN/UPDATE*/NJ_t *NJ, /*IN/OUT*/top_hits_t *tophits);
+
+/* Find the best join to do. */
 void TopHitNJSearch(/*IN/UPDATE*/NJ_t *NJ,
 		    int nActive,
-		    int m,
-		    /*IN/UPDATE*/besthit_t *visible,
-		    /*IN/OUT*/int *topvisible, /* a list */
-		    /*IN/OUT*/int *topVisibleAge, /* an integer */
-		    /*IN/UPDATE*/besthit_t **tophits,
+		    /*IN/OUT*/top_hits_t *tophits,
 		    /*OUT*/besthit_t *bestjoin);
 
-/* Returns the index of the best hit within the tophits.
+/* Returns the best hit within top hits
    NJ may be modified because it updates out-distances if they are too stale
-   tophits may be modified because it walks "up" from hits to joined nodes
    Does *not* update visible set
 */
-int GetBestFromTopHits(int iNode, /*IN/UPDATE*/NJ_t *NJ, int nActive,
-			/*IN/UPDATE*/besthit_t *tophits, /* of iNode */
-		       int nTopHits);
+void GetBestFromTopHits(int iNode, /*IN/UPDATE*/NJ_t *NJ, int nActive,
+			/*IN*/top_hits_t *tophits,
+			/*OUT*/besthit_t *bestjoin);
 
 /* visible set is modifiable so that we can reset it more globally when we do
    a "refresh", but we also set the visible set for newnode and do any
    "reset" updates too. And, we update many outdistances.
  */
-void TopHitJoin(/*IN/UPDATE*/NJ_t *NJ, int newnode, int nActive, int m,
-		/*IN/OUT*/besthit_t **tophits,
-		/*IN/OUT*/int *tophitAge,
-		/*IN/OUT*/besthit_t *visible,
-		/*IN/OUT*/int *topvisible);
+void TopHitJoin(int newnode,
+		/*IN/UPDATE*/NJ_t *NJ, int nActive,
+		/*IN/OUT*/top_hits_t *tophits);
 
-/* Sort by criterion and save the best nOut hits as a new array,
-   which is returned.
+/* Sort the input besthits by criterion
+   and save the best nOut hits as a new array in top_hits_lists
    Does not update criterion or out-distances
    Ignores (silently removes) hit to self
-   Pads the list with invalid entries so that it is always of length nOut
+   Saved list may be shorter than requested if there are insufficient entries
 */
-besthit_t *SortSaveBestHits(/*IN/UPDATE*/besthit_t *besthits, int iNode, int nIn, int nOut);
+void SortSaveBestHits(int iNode, /*IN/SORT*/besthit_t *besthits,
+		      int nIn, int nOut,
+		      /*IN/OUT*/top_hits_t *tophits);
 
 /* Given candidate hits from one node, "transfer" them to another node:
    Stores them in a new place in the same order
    searches up to active nodes if hits involve non-active nodes
    If update flag is set, it also recomputes distance and criterion
-   (and ensures that out-distances are updated)
+   (and ensures that out-distances are updated); otherwise
+   it sets dist to -1e20 and criterion to 1e20
 
  */
 void TransferBestHits(/*IN/UPDATE*/NJ_t *NJ, int nActive,
@@ -1046,41 +1187,47 @@ void TransferBestHits(/*IN/UPDATE*/NJ_t *NJ, int nActive,
 		      /*OUT*/besthit_t *newhits,
 		      bool updateDistance);
 
-/* Given a top-hit list, look for improvements to the visible set of (j).
+/* Create best hit objects from 1 or more hits. Do not update out-distances or set criteria */
+void HitsToBestHits(/*IN*/hit_t *hits, int nHits, int iNode, /*OUT*/besthit_t *newhits);
+besthit_t HitToBestHit(int i, hit_t hit);
+
+/* Given a set of besthit entries,
+   look for improvements to the visible set of the j entries.
    Updates out-distances as it goes.
-   If visible[j] is stale, then it set the current node to visible
-   (visible[j] is usually stale because of the join that created this node...)
+   Also replaces stale nodes with this node, because a join is usually
+   how this happens (i.e. it does not need to walk up to ancestors).
+   Note this calls UpdateTopVisible() on any change
 */
-void ResetVisible(/*IN/UPDATE*/NJ_t *NJ, int nActive,
-		  /*IN*/besthit_t *tophitsNode,
-		  int nTopHits,
-		  /*IN/UPDATE*/besthit_t *visible,
-		  /*IN/UPDATE*/int *topvisible);
+void UpdateVisible(/*IN/UPDATE*/NJ_t *NJ, int nActive,
+		   /*IN*/besthit_t *tophitsNode,
+		   int nTopHits,
+		   /*IN/OUT*/top_hits_t *tophits);
 
-/* Update the top-visible list to perhaps include visible[iNode] */
-void UpdateTopVisible(/*IN*/NJ_t * NJ,
-		      /*IN*/besthit_t *visible,
-		      /*IN/UPDATE*/int *topvisible,
-		      int m, 	/* length of topvisible */
-		      int iNode);
+/* Update the top-visible list to perhaps include this hit (O(sqrt(N)) time) */
+void UpdateTopVisible(/*IN*/NJ_t * NJ, int nActive,
+		      int iNode, /*IN*/hit_t *hit,
+		      /*IN/OUT*/top_hits_t *tophits);
 
-/* Recompute the topvisible list */
-void ResetTopVisible(/*IN*/NJ_t *NJ,
+/* Recompute the top-visible subset of the visible set */
+void ResetTopVisible(/*IN/UPDATE*/NJ_t *NJ,
 		     int nActive,
-		     /*IN*/besthit_t *visible,
-		     /*OUT*/int *topvisible,
-		     int m);	/* length of topvisible */
+		     /*IN/OUT*/top_hits_t *tophits);
 
 /* Make a shorter list with only unique entries.
-   Ignores self-hits to iNode and "dead" hits to
-   nodes that have parents.
+   Replaces any "dead" hits to nodes that have parents with their active ancestors
+   and ignores any that become dead.
+   Updates all criteria.
+   Combined gets sorted by i & j
+   The returned list is allocated to nCombined even though only *nUniqueOut entries are filled
 */
-besthit_t *UniqueBestHits(NJ_t *NJ, int iNode, besthit_t *combined, int nCombined, /*OUT*/int *nUniqueOut);
+besthit_t *UniqueBestHits(/*IN/UPDATE*/NJ_t *NJ, int nActive,
+			  /*IN/SORT*/besthit_t *combined, int nCombined,
+			  /*OUT*/int *nUniqueOut);
 
 nni_t ChooseNNI(profile_t *profiles[4],
 		/*OPTIONAL*/distance_matrix_t *dmat,
 		int nPos, int nConstraints,
-		/*OUT*/double criteria[3]); /* The three potential internal branch lengths or log likelihoods*/
+		/*OUT*/double criteria[3]); /* The three internal branch lengths or log likelihoods*/
 
 /* length[] is ordered as described by quartet_length_t, but after we do the swap
    of B with C (to give AC|BD) or B with D (to get AD|BC), if that is the returned choice
@@ -1104,6 +1251,38 @@ double MLQuartetLogLk(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD
 
 /* Given a topology and branch lengths, estimate rates & recompute profiles */
 void SetMLRates(/*IN/OUT*/NJ_t *NJ, int nRateCategories);
+
+/* Returns a set of nRateCategories potential rates; the caller must free it */
+float *MLSiteRates(int nRateCategories);
+
+/* returns site_loglk so that
+   site_loglk[nPos*iRate + j] is the log likelihood of site j with rate iRate
+   The caller must free it.
+*/
+double *MLSiteLikelihoodsByRate(/*IN*/NJ_t *NJ, /*IN*/float *rates, int nRateCategories);
+
+typedef struct {
+  double mult;			/* multiplier for the rates / divisor for the tree-length */
+  double alpha;
+  int nPos;
+  int nRateCats;
+  float *rates;
+  double *site_loglk;
+} siteratelk_t;
+
+double GammaLogLk(/*IN*/siteratelk_t *s, /*OPTIONAL OUT*/double *gamma_loglk_sites);
+
+/* Input site_loglk must be for each rate. Note that FastTree does not reoptimize
+   the branch lengths under the Gamma model -- it optimizes the overall scale.
+   Reports the gamma log likelihhod (and logs site likelihoods if fpLog is set),
+   and reports the rescaling value.
+*/
+double RescaleGammaLogLk(int nPos, int nRateCats,
+			/*IN*/float *rates, /*IN*/double *site_loglk,
+			/*OPTIONAL*/FILE *fpLog);
+
+/* P(value<=x) for the gamma distribution with shape parameter alpha and scale 1/alpha */
+double PGamma(double x, double alpha);
 
 /* Given a topology and branch lengths, optimize GTR rates and quickly reoptimize branch lengths
    If gtrfreq is NULL, then empirical frequencies are used
@@ -1191,7 +1370,7 @@ void UpdateForNNI(/*IN/OUT*/NJ_t *NJ, int node, /*IN/OUT*/profile_t **upProfiles
 void ReplaceChild(/*IN/OUT*/NJ_t *NJ, int parent, int oldchild, int newchild);
 
 int CompareHitsByCriterion(const void *c1, const void *c2);
-int CompareHitsByJ(const void *c1, const void *c2);
+int CompareHitsByIJ(const void *c1, const void *c2);
 
 int NGaps(NJ_t *NJ, int node);	/* only handles leaf sequences */
 
@@ -1260,6 +1439,11 @@ float vector_multiply3_sum(/*IN*/float *f1, /*IN*/float *f2, /*IN*/float* f3, in
 float vector_sum(/*IN*/float *f1, int n);
 void vector_multiply_by(/*IN/OUT*/float *f, /*IN*/float fBy, int n);
 
+double clockDiff(/*IN*/struct timeval *clock_start);
+int timeval_subtract (/*OUT*/struct timeval *result, /*IN*/struct timeval *x, /*IN*/struct timeval *y);
+
+char *OpenMPString(void);
+
 void ran_start(long seed);
 double knuth_rand();		/* Random number between 0 and 1 */
 void tred2 (double *a, const int n, const int np, double *d, double *e);
@@ -1268,7 +1452,7 @@ void tqli(double *d, double *e, int n, int np, double *z);
 
 /* Like mymalloc; duplicates the input (returns NULL if given NULL) */
 void *mymemdup(void *data, size_t sz);
-void *myrealloc(void *data, size_t szOld, size_t szNew);
+void *myrealloc(void *data, size_t szOld, size_t szNew, bool bCopy);
 
 double pnorm(double z);		/* Probability(value <=z)  */
 
@@ -1411,7 +1595,8 @@ int main(int argc, char **argv) {
   double gtrfreq[4] = {0.25,0.25,0.25,0.25};
 
   if (isatty(STDIN_FILENO) && argc == 1) {
-    fprintf(stderr,"Usage for FastTree version %s (%s):\n%s", FT_VERSION, SSE_STRING, usage);
+    fprintf(stderr,"Usage for FastTree version %s %s%s:\n%s",
+	    FT_VERSION, SSE_STRING, OpenMPString(), usage);
     exit(0);
   }    
   for (iArg = 1; iArg < argc; iArg++) {
@@ -1433,6 +1618,11 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[iArg],"-fastest") == 0) {
       fastest = 1;
       tophitsRefresh = 0.5;
+      useTopHits2nd = true;
+    } else if (strcmp(argv[iArg],"-2nd") == 0) {
+      useTopHits2nd = true;
+    } else if (strcmp(argv[iArg],"-no2nd") == 0) {
+      useTopHits2nd = false;
     } else if (strcmp(argv[iArg],"-slownni") == 0) {
       fastNNI = false;
     } else if (strcmp(argv[iArg], "-matrix") == 0 && iArg < argc-1) {
@@ -1522,10 +1712,11 @@ int main(int argc, char **argv) {
       spr = 0;
       nni = 0;
     } else if (strcmp(argv[iArg],"-help") == 0) {
-      fprintf(stderr,"FastTree %s (%s):\n%s", FT_VERSION, SSE_STRING, usage);
+      fprintf(stderr,"FastTree %s %s%s:\n%s", FT_VERSION, SSE_STRING, OpenMPString(), usage);
       exit(0);
     } else if (strcmp(argv[iArg],"-expert") == 0) {
-      fprintf(stderr, "Detailed usage for FastTree %s (%s):\n%s", FT_VERSION, SSE_STRING, expertUsage);
+      fprintf(stderr, "Detailed usage for FastTree %s %s%s:\n%s",
+	      FT_VERSION, SSE_STRING, OpenMPString(), expertUsage);
       exit(0);
     } else if (strcmp(argv[iArg],"-pseudo") == 0) {
       if (iArg < argc-1 && isdigit(argv[iArg+1][0])) {
@@ -1603,6 +1794,8 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[iArg],"-log") == 0 && iArg < argc-1) {
       iArg++;
       logfile = argv[iArg];
+    } else if (strcmp(argv[iArg],"-gamma") == 0) {
+      gammaLogLk = true;
     } else if (argv[iArg][0] == '-') {
       fprintf(stderr, "Unknown or incorrect use of option %s\n%s", argv[iArg], usage);
       exit(1);
@@ -1686,8 +1879,8 @@ int main(int argc, char **argv) {
 
     for (i = 0; i < nFPs; i++) {
       FILE *fp = fps[i];
-      fprintf(fp,"Version: %s (%s) Alignment: %s",
-	      FT_VERSION, SSE_STRING, fileName != NULL ? fileName : "standard input");
+      fprintf(fp,"FastTree Version %s %s%s\nAlignment: %s",
+	      FT_VERSION, SSE_STRING, OpenMPString(), fileName != NULL ? fileName : "standard input");
       if (nAlign>1)
 	fprintf(fp, " (%d alignments)", nAlign);
       fprintf(fp,"\n%s distances: %s Joins: %s Support: %s\n",
@@ -1697,8 +1890,9 @@ int main(int argc, char **argv) {
 	      bionj ? "weighted" : "balanced" ,
 	      supportString);
       if (intreeFile == NULL)
-	fprintf(fp, "Search: %s %s %s %s\nTopHits: %s\n",
+	fprintf(fp, "Search: %s%s %s %s %s\nTopHits: %s\n",
 		slow?"Exhaustive (slow)" : (fastest ? "Fastest" : "Normal"),
+		useTopHits2nd ? "+2nd" : "",
 		nniString, sprString, mlnniString,
 		tophitString);
       else
@@ -1775,7 +1969,8 @@ int main(int argc, char **argv) {
       fflush(fpLog);
     }
 
-    clock_t clock_start = clock();
+    struct timeval clock_start;
+    gettimeofday(&clock_start,NULL);
     ProgressReport("Read alignment",0,0,0,0);
 
     /* Check that all names in alignment are unique */
@@ -1784,7 +1979,7 @@ int main(int argc, char **argv) {
     for (i=0; i<aln->nSeq; i++) {
       hashiterator_t hi = FindMatch(hashnames,aln->names[i]);
       if (HashCount(hashnames,hi) != 1) {
-	fprintf(stderr,"Non-unique name %s in the alignment\n",aln->names[i]);
+	fprintf(stderr,"Non-unique name '%s' in the alignment\n",aln->names[i]);
 	exit(1);
       }
     }
@@ -1815,10 +2010,11 @@ int main(int argc, char **argv) {
       outprofileOps = 0;
       seqOps = 0;
       profileAvgOps = 0;
-      nBetter = 0;
+      nHillBetter = 0;
       nCloseUsed = 0;
+      nClose2Used = 0;
       nRefreshTopHits = 0;
-      nVisibleReset = 0;
+      nVisibleUpdate = 0;
       nNNI = 0;
       nML_NNI = 0;
       nProfileFreqAlloc = 0;
@@ -1863,6 +2059,7 @@ int main(int argc, char **argv) {
       if (verbose>2) fprintf(stderr, "read %s seqs %d (%d unique) positions %d nameLast %s seqLast %s\n",
 			     fileName ? fileName : "standard input",
 			     aln->nSeq, unique->nUnique, aln->nPos, aln->names[aln->nSeq-1], aln->seqs[aln->nSeq-1]);
+      FreeAlignmentSeqs(/*IN/OUT*/aln); /*no longer needed*/
       if (fpInTree != NULL) {
 	if (intree1)
 	  fseek(fpInTree, 0L, SEEK_SET);
@@ -1890,7 +2087,7 @@ int main(int argc, char **argv) {
       int MLnniToDo = (MLnni != -1) ? MLnni : (int)(0.5 + 2.0*log(NJ->nSeq)/log(2));
       if(verbose>0) {
 	if (fpInTree == NULL)
-	    fprintf(stderr, "Initial topology in %.2f seconds\n", (clock()-clock_start)/(double)CLOCKS_PER_SEC);
+	  fprintf(stderr, "Initial topology in %.2f seconds\n", clockDiff(&clock_start));
 	if (spr > 0 || nniToDo > 0 || MLnniToDo > 0)
 	  fprintf(stderr,"Refining topology: %d rounds ME-NNIs, %d rounds ME-SPRs, %d rounds ML-NNIs\n", nniToDo, spr, MLnniToDo);
       }  
@@ -1948,17 +2145,24 @@ int main(int argc, char **argv) {
 	  total_len += fabs(NJ->branchlength[iNode]);
 	if (verbose>0) {
 	  fprintf(stderr, "Total branch-length %.3f after %.2f sec\n",
-		  total_len,
-		  (clock()-clock_start)/(double)CLOCKS_PER_SEC);
+		  total_len, clockDiff(&clock_start));
 	  fflush(stderr);
 	}
 	if (fpLog) {
 	  fprintf(fpLog, "Total branch-length %.3f after %.2f sec\n",
-		total_len,
-		(clock()-clock_start)/(double)CLOCKS_PER_SEC);
+		  total_len, clockDiff(&clock_start));
 	  fflush(stderr);
 	}
       }
+
+#ifdef TRACK_MEMORY
+  if (verbose>1) {
+    struct mallinfo mi = mallinfo();
+    fprintf(stderr, "Memory @ end of ME phase: %.2f MB (%.1f byte/pos) useful %.2f expected %.2f\n",
+	    (mi.arena+mi.hblkhd)/1.0e6, (mi.arena+mi.hblkhd)/(double)(NJ->nSeq*(double)NJ->nPos),
+	    mi.uordblks/1.0e6, mymallocUsed/1e6);
+  }
+#endif
 
       SplitCount_t splitcount = {0,0,0,0,0.0,0.0};
       if (MLnniToDo > 0 || MLlen) {
@@ -1998,7 +2202,7 @@ int main(int argc, char **argv) {
 		      loglk,
 		      dMaxChange,
 		      bConverged ? " (converged)" : "",
-		      (clock()-clock_start)/(double)CLOCKS_PER_SEC);
+		      clockDiff(&clock_start));
 	    if (fpLog)
 	      fprintf(fpLog, "TreeLogLk\tLength%d\t%.4lf\tMaxChange\t%.4lf\n",
 		      iRound, loglk, dMaxChange);
@@ -2031,7 +2235,7 @@ int main(int argc, char **argv) {
 	    fprintf(stderr, "ML-NNI round %d: LogLk %s= %.3f NNIs %d max delta %.2f Time %.2f%s\n",
 		    iMLnni+1,
 		    exactML || nCodes != 20 ? "" : "~",
-		    loglk, changes, maxDelta,  (clock()-clock_start)/(double)CLOCKS_PER_SEC,
+		    loglk, changes, maxDelta,  clockDiff(&clock_start),
 		    bConverged ? " (final)" : "");
 	  if (fpLog)
 	    fprintf(fpLog, "TreeLogLk\tML_NNI%d\t%.4lf\tMaxChange\t%.4lf\n", iMLnni+1, loglk, maxDelta);
@@ -2070,16 +2274,29 @@ int main(int argc, char **argv) {
 	      fprintf(stderr, "Optimize all lengths: LogLk %s= %.3f Time %.2f\n",
 		      exactML || nCodes != 20 ? "" : "~",
 		      loglk, 
-		      (clock()-clock_start)/(double)CLOCKS_PER_SEC);
+		      clockDiff(&clock_start));
 	    if (fpLog) {
 	      fprintf(fpLog, "TreeLogLk\tML_Lengths%d\t%.4f\n", 2, loglk);
 	      fflush(fpLog);
 	    }
 	  }
 	}
+
 	/* Count bad splits and compute SH-like supports if desired */
 	if ((MLnniToDo > 0 && !fastest) || nBootstrap > 0)
 	  TestSplitsML(NJ, /*OUT*/&splitcount, nBootstrap);
+
+	/* Compute gamma-based likelihood? */
+	if (gammaLogLk && nRateCats > 1) {
+	  float *rates = MLSiteRates(nRateCats);
+	  double *site_loglk = MLSiteLikelihoodsByRate(NJ, rates, nRateCats);
+	  double scale = RescaleGammaLogLk(NJ->nPos, nRateCats, rates, /*IN*/site_loglk, /*OPTIONAL*/fpLog);
+	  rates = myfree(rates, sizeof(float) * nRateCats);
+	  site_loglk = myfree(site_loglk, sizeof(double) * nRateCats * NJ->nPos);
+
+	  for (i = 0; i < NJ->maxnodes; i++)
+	    NJ->branchlength[i] *= scale;
+	}
       } else {
 	/* Minimum evolution supports */
 	TestSplitsMinEvo(NJ, /*OUT*/&splitcount);
@@ -2090,7 +2307,7 @@ int main(int argc, char **argv) {
       for (i = 0; i < nFPs; i++) {
 	FILE *fp = fps[i];
 	fprintf(fp, "Total time: %.2f seconds Unique: %d/%d Bad splits: %d/%d",
-		(clock()-clock_start)/(double)CLOCKS_PER_SEC,
+		clockDiff(&clock_start),
 		NJ->nSeq, aln->nSeq,
 		splitcount.nBadSplits, splitcount.nSplits);
 	if (splitcount.dWorstDeltaUnconstrained >  0)
@@ -2112,13 +2329,12 @@ int main(int argc, char **argv) {
 	  double dN2 = NJ->nSeq*(double)NJ->nSeq;
 	  fprintf(fp, "Dist/N**2: by-profile %.3f (out %.3f) by-leaf %.3f avg-prof %.3f\n",
 		  profileOps/dN2, outprofileOps/dN2, seqOps/dN2, profileAvgOps/dN2);
-	  if (nCloseUsed>0 || nRefreshTopHits>0)
-	    fprintf(fp, "Top hits: close neighbors %ld/%d refreshes %ld",
-		    nCloseUsed, NJ->nSeq, nRefreshTopHits);
-	  if(!slow) fprintf(fp, " Hill-climb: %ld Update-best: %ld", nBetter, nVisibleReset);
+	  if (nCloseUsed>0 || nClose2Used > 0 || nRefreshTopHits>0)
+	    fprintf(fp, "Top hits: close neighbors %ld/%d 2nd-level %ld refreshes %ld",
+		    nCloseUsed, NJ->nSeq, nClose2Used, nRefreshTopHits);
+	  if(!slow) fprintf(fp, " Hill-climb: %ld Update-best: %ld\n", nHillBetter, nVisibleUpdate);
 	  if (nniToDo > 0 || spr > 0 || MLnniToDo > 0)
-	    fprintf(fp, " NNI: %ld SPR: %ld ML-NNI: %ld", nNNI, nSPR, nML_NNI);
-	  fprintf(fp,"\n");
+	    fprintf(fp, "NNI: %ld SPR: %ld ML-NNI: %ld\n", nNNI, nSPR, nML_NNI);
 	  if (MLnniToDo > 0) {
 	    fprintf(fp, "Max-lk operations: lk %ld posterior %ld", nLkCompute, nPosteriorCompute);
 	    if (nAAPosteriorExact > 0 || nAAPosteriorRough > 0)
@@ -2130,10 +2346,10 @@ int main(int argc, char **argv) {
 	  }
 	}
 #ifdef TRACK_MEMORY
-	fprintf(fpLog, "Memory: %.2f MB (%.1f byte/pos) ",
+	fprintf(fp, "Memory: %.2f MB (%.1f byte/pos) ",
 		maxmallocHeap/1.0e6, maxmallocHeap/(double)(aln->nSeq*(double)aln->nPos));
 	/* Only report numbers from before we do reliability estimates */
-	fprintf(fpLog, "profile-freq-alloc %ld avoided %.2f%%\n", 
+	fprintf(fp, "profile-freq-alloc %ld avoided %.2f%%\n", 
 		svProfileFreqAlloc,
 		svProfileFreqAvoid > 0 ?
 		100.0*svProfileFreqAvoid/(double)(svProfileFreqAlloc+svProfileFreqAvoid)
@@ -2162,20 +2378,25 @@ int main(int argc, char **argv) {
 }
 
 void ProgressReport(char *format, int i1, int i2, int i3, int i4) {
-  static bool clock_set = false;
-  static clock_t clock_last;
-  static clock_t clock_begin;
+  static bool time_set = false;
+  static struct timeval time_last;
+  static struct timeval time_begin;
 
   if (!showProgress)
     return;
 
-  clock_t clock_now = clock();
-  if (!clock_set) {
-    clock_begin = clock_last = clock_now;
-    clock_set = true;
+  static struct timeval time_now;
+  gettimeofday(&time_now,NULL);
+  if (!time_set) {
+    time_begin = time_last = time_now;
+    time_set = true;
   }
-  if ((clock_now-clock_last)/(double)CLOCKS_PER_SEC > 0.1 || verbose > 1) {
-    fprintf(stderr, "%9.2f seconds: ", (clock_now-clock_begin)/(double)CLOCKS_PER_SEC);
+  static struct timeval elapsed;
+  timeval_subtract(&elapsed,&time_now,&time_last);
+  
+  if (elapsed.tv_sec > 1 || elapsed.tv_usec > 100*1000 || verbose > 1) {
+    timeval_subtract(&elapsed,&time_now,&time_begin);
+    fprintf(stderr, "%7i.%2.2i seconds: ", (int)elapsed.tv_sec, (int)(elapsed.tv_usec/10000));
     fprintf(stderr, format, i1, i2, i3, i4);
     if (verbose > 1 || !isatty(STDERR_FILENO)) {
       fprintf(stderr, "\n");
@@ -2183,7 +2404,7 @@ void ProgressReport(char *format, int i1, int i2, int i3, int i4) {
       fprintf(stderr, "   \r");
     }
     fflush(stderr);
-    clock_last = clock_now;
+    time_last = time_now;
   }
 }
 
@@ -2402,15 +2623,14 @@ void FastNJ(NJ_t *NJ) {
 
   /* else 3 or more sequences */
 
-  /* The visible set stores the best hit of each node */
-  besthit_t *visible = NULL;
+  /* The visible set stores the best hit of each node (unless using top hits, in which case
+     it is handled by the top hits routines) */
+  besthit_t *visible = NULL;	/* Not used if doing top hits */
   besthit_t *besthitNew = NULL;	/* All hits of new node -- not used if doing top-hits */
-  int *topvisible = NULL;	/* The top m candidates in the visible set */
 
   /* The top-hits lists, with the key parameter m = length of each top-hit list */
-  besthit_t **tophits = NULL;	/* Up to top m hits for each node; i and j are -1 if past end of list */
-  int *tophitAge = NULL;	/* #Joins since list was refreshed, 1 value per node */
-  int m = 0;			/* length of each list */
+  top_hits_t *tophits = NULL;
+  int m = 0;			/* maximum length of a top-hits list */
   if (tophitsMult > 0) {
     m = (int)(0.5 + tophitsMult*sqrt(NJ->nSeq));
     if(m<4 || 2*m >= NJ->nSeq) {
@@ -2420,46 +2640,23 @@ void FastNJ(NJ_t *NJ) {
       if(verbose>2) fprintf(stderr,"Top-hit-list size = %d of %d\n", m, NJ->nSeq);
     }
   }
-
-
   assert(!(slow && m>0));
 
+  /* Initialize top-hits or visible set */
   if (m>0) {
-      tophits = (besthit_t**)mymalloc(sizeof(besthit_t*) * NJ->maxnodes);
-      for(iNode=0; iNode < NJ->maxnodes; iNode++) tophits[iNode] = NULL;
-      SetAllLeafTopHits(NJ, m, /*OUT*/tophits);
-      tophitAge = (int*)mymalloc(sizeof(int) * NJ->maxnodes);
-      for(iNode=0; iNode < NJ->maxnodes; iNode++) tophitAge[iNode] = 0;
-#ifdef TRACK_MEMORY
-      if (verbose>1) {
-	struct mallinfo mi = mallinfo();
-	fprintf(stderr, "Memory after SetAllLeafTopHits(): %.2f MB (%.1f byte/pos) useful %.2f\n",
-		(mi.arena+mi.hblkhd)/1.0e6, (mi.arena+mi.hblkhd)/(double)(NJ->nSeq*(double)NJ->nPos),
-		mi.uordblks/1.0e6);
-      }
-#endif
-      topvisible = (int*)mymalloc(sizeof(int)*m);
-      int i;
-      for (i = 0; i < m; i++)
-	topvisible[i] = -1;
-  }
-
-  /* Initialize visible set */
-  if (!slow) {
+    tophits = InitTopHits(NJ, m);
+    SetAllLeafTopHits(/*IN/UPDATE*/NJ, /*OUT*/tophits);
+    ResetTopVisible(/*IN/UPDATE*/NJ, /*nActive*/NJ->nSeq, /*IN/OUT*/tophits);
+  } else if (!slow) {
     visible = (besthit_t*)mymalloc(sizeof(besthit_t)*NJ->maxnodes);
-    if(m==0) besthitNew = (besthit_t*)mymalloc(sizeof(besthit_t)*NJ->maxnodes);
-    for (iNode = 0; iNode < NJ->nSeq; iNode++) {
-      if (m>0)
-	visible[iNode] = tophits[iNode][GetBestFromTopHits(iNode, NJ, /*nActive*/NJ->nSeq, tophits[iNode], /*nTop*/m)];
-      else
-	SetBestHit(iNode, NJ, /*nActive*/NJ->nSeq, /*OUT*/&visible[iNode], /*OUT IGNORED*/NULL);
-    }
+    besthitNew = (besthit_t*)mymalloc(sizeof(besthit_t)*NJ->maxnodes);
+    for (iNode = 0; iNode < NJ->nSeq; iNode++)
+      SetBestHit(iNode, NJ, /*nActive*/NJ->nSeq, /*OUT*/&visible[iNode], /*OUT IGNORED*/NULL);
   }
 
   /* Iterate over joins */
   int nActiveOutProfileReset = NJ->nSeq;
   int nActive;
-  int topVisibleAge = 0;
   for (nActive = NJ->nSeq; nActive > 3; nActive--) {
     int nJoinsDone = NJ->nSeq - nActive;
     if (nJoinsDone > 0 && (nJoinsDone % 100) == 0)
@@ -2469,9 +2666,7 @@ void FastNJ(NJ_t *NJ) {
     if (slow) {
       ExhaustiveNJSearch(NJ,nActive,/*OUT*/&join);
     } else if (m>0) {
-      TopHitNJSearch(/*IN/OUT*/NJ, nActive, m,
-		     /*IN/OUT*/visible, /*IN/OUT*/topvisible, /*IN/OUT*/&topVisibleAge,
-		     /*IN/OUT*/tophits, /*OUT*/&join);
+      TopHitNJSearch(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/tophits, /*OUT*/&join);
     } else {
       FastNJSearch(NJ, nActive, /*IN/OUT*/visible, /*OUT*/&join);
     }
@@ -2500,6 +2695,8 @@ void FastNJ(NJ_t *NJ) {
     /* because of the stale out-distance heuristic, make sure that these are up-to-date */
     SetOutDistance(NJ, join.i, nActive);
     SetOutDistance(NJ, join.j, nActive);
+    /* Make sure weight is set and criterion is up to date */
+    SetDistCriterion(NJ, nActive, /*IN/OUT*/&join);
     assert(NJ->nOutDistActive[join.i] == nActive);
     assert(NJ->nOutDistActive[join.j] == nActive);
 
@@ -2585,13 +2782,13 @@ void FastNJ(NJ_t *NJ) {
 		  deltaProfileVarTot,deltaProfileVarOut,lambdaTot,bionjWeight);
       }
     }
-    if (verbose>2) fprintf(stderr, "Join\t%d\t%d\t%.6f\tlambda\t%.6f\tselfw\t%.3f\t%.3f\tnew\t%d\n",
-			   join.i < join.j ? join.i : join.j,
-			   join.i < join.j ? join.j : join.i,
-			   join.criterion, bionjWeight,
-			   NJ->selfweight[join.i < join.j ? join.i : join.j],
-			   NJ->selfweight[join.i < join.j ? join.j : join.i],
-			   newnode);
+    if (verbose > 2) fprintf(stderr, "Join\t%d\t%d\t%.6f\tlambda\t%.6f\tselfw\t%.3f\t%.3f\tnew\t%d\n",
+			      join.i < join.j ? join.i : join.j,
+			      join.i < join.j ? join.j : join.i,
+			      join.criterion, bionjWeight,
+			      NJ->selfweight[join.i < join.j ? join.i : join.j],
+			      NJ->selfweight[join.i < join.j ? join.j : join.i],
+			      newnode);
     
     NJ->diameter[newnode] = bionjWeight * (NJ->branchlength[join.i] + NJ->diameter[join.i])
       + (1-bionjWeight) * (NJ->branchlength[join.j] + NJ->diameter[join.j]);
@@ -2644,9 +2841,7 @@ void FastNJ(NJ_t *NJ) {
 
     /* Find the best hit of the joined node IJ */
     if (m>0) {
-      TopHitJoin(/*IN/OUT*/NJ, newnode, nActive-1, m,
-		 /*IN/OUT*/tophits, /*IN/OUT*/tophitAge,
-		 /*IN/OUT*/visible, /*IN/OUT*/topvisible);
+      TopHitJoin(newnode, /*IN/UPDATE*/NJ, nActive-1, /*IN/OUT*/tophits);
     } else {
       /* Not using top-hits, so we update all out-distances */
       for (iNode = 0; iNode < NJ->maxnode; iNode++) {
@@ -2680,7 +2875,7 @@ void FastNJ(NJ_t *NJ) {
 	      if(verbose>3) fprintf(stderr,"Visible %d reset from %d to %d (%f vs. %f)\n",
 				     iNode, iOldVisible, 
 				     newnode, visible[iNode].criterion, besthitNew[iNode].criterion);
-	      if(NJ->parent[iOldVisible] < 0) nVisibleReset++;
+	      if(NJ->parent[iOldVisible] < 0) nVisibleUpdate++;
 	      visible[iNode].j = newnode;
 	      visible[iNode].dist = besthitNew[iNode].dist;
 	      visible[iNode].criterion = besthitNew[iNode].criterion;
@@ -2703,15 +2898,7 @@ void FastNJ(NJ_t *NJ) {
   /* We no longer need the tophits, visible set, etc. */
   if (visible != NULL) visible = myfree(visible,sizeof(besthit_t)*NJ->maxnodes);
   if (besthitNew != NULL) besthitNew = myfree(besthitNew,sizeof(besthit_t)*NJ->maxnodes);
-  if (tophits != NULL) {
-    for (iNode = 0; iNode < NJ->maxnode; iNode++) {
-      if (tophits[iNode] != NULL)
-	tophits[iNode] = myfree(tophits[iNode],sizeof(besthit_t)*m);
-    }
-    tophits = myfree(tophits, sizeof(besthit_t*)*NJ->maxnodes);
-    tophitAge = myfree(tophitAge,sizeof(int)*NJ->maxnodes);
-  }
-  topvisible = myfree(topvisible, sizeof(int)*m);
+  tophits = FreeTopHits(tophits);
 
   /* Add a root for the 3 remaining nodes */
   int top[3];
@@ -2840,7 +3027,7 @@ void FastNJSearch(NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *besthits, /*OUT*/b
 	join->dist = besthits[join->j].dist;
 	join->criterion = besthits[join->j].criterion;
       }
-      if(changed) nBetter++;
+      if(changed) nHillBetter++;
     } while(changed);
   }
 }
@@ -3363,8 +3550,8 @@ alignment_t *ReadAlignment(/*IN*/FILE *fp) {
 	nSeq++;
 	if (nSeq > nSaved) {
 	  int nNewSaved = nSaved*2;
-	  seqs = myrealloc(seqs,sizeof(char*)*nSaved,sizeof(char*)*nNewSaved);
-	  names = myrealloc(names,sizeof(char*)*nSaved,sizeof(char*)*nNewSaved);
+	  seqs = myrealloc(seqs,sizeof(char*)*nSaved,sizeof(char*)*nNewSaved, /*copy*/false);
+	  names = myrealloc(names,sizeof(char*)*nSaved,sizeof(char*)*nNewSaved, /*copy*/false);
 	  nSaved = nNewSaved;
 	}
 	names[nSeq-1] = (char*)mymemdup(buf+1,strlen(buf));
@@ -3382,7 +3569,7 @@ alignment_t *ReadAlignment(/*IN*/FILE *fp) {
 	    nKeep++;
 	}
 	int nOld = (seqs[nSeq-1] == NULL) ? 0 : strlen(seqs[nSeq-1]);
-	seqs[nSeq-1] = (char*)myrealloc(seqs[nSeq-1], nOld, nOld+nKeep+1);
+	seqs[nSeq-1] = (char*)myrealloc(seqs[nSeq-1], nOld, nOld+nKeep+1, /*copy*/false);
 	if (nOld+nKeep > nPos)
 	  nPos = nOld + nKeep;
 	char *out = seqs[nSeq-1] + nOld;
@@ -3405,8 +3592,8 @@ alignment_t *ReadAlignment(/*IN*/FILE *fp) {
       fprintf(stderr, "No sequence data for last entry %s\n",names[nSeq-1]);
       exit(1);
     }
-    names = myrealloc(names,sizeof(char*)*nSaved,sizeof(char*)*nSeq);
-    seqs = myrealloc(seqs,sizeof(char*)*nSaved,sizeof(char*)*nSeq);
+    names = myrealloc(names,sizeof(char*)*nSaved,sizeof(char*)*nSeq, /*copy*/false);
+    seqs = myrealloc(seqs,sizeof(char*)*nSaved,sizeof(char*)*nSeq, /*copy*/false);
   } else {
     /* PHYLIP interleaved-like format
        Allow arbitrary length names, require spaces between names and sequences
@@ -3544,6 +3731,13 @@ alignment_t *ReadAlignment(/*IN*/FILE *fp) {
   align->seqs = seqs;
   align->nSaved = nSaved;
   return(align);
+}
+
+void FreeAlignmentSeqs(/*IN/OUT*/alignment_t *aln) {
+  assert(aln != NULL);
+  int i;
+  for (i = 0; i < aln->nSeq; i++)
+    aln->seqs[i] = myfree(aln->seqs[i], aln->nPos+1);
 }
 
 alignment_t *FreeAlignment(alignment_t *aln) {
@@ -4191,7 +4385,7 @@ void UpdateOutProfile(/*IN/OUT*/profile_t *out, profile_t *old1, profile_t *old2
     float *fNew = GET_FREQ(new,i,/*IN/OUT*/iFreqNew);
 
     assert(out->codes[i] == NOCODE && fOut != NULL); /* No no-vector optimization for outprofiles */
-    if (verbose > 2 && i < 3) {
+    if (verbose > 3 && i < 3) {
       fprintf(stderr,"Updating out-profile position %d weight %f (mult %f)\n",
 	      i, out->weights[i], out->weights[i]*nActiveOld);
     }
@@ -4266,11 +4460,16 @@ void SetBestHit(int node, NJ_t *NJ, int nActive,
   int j;
   besthit_t tmp;
 
+#ifdef OPENMP
+  /* Note -- if we are already in a parallel region, this will be ignored */
+  #pragma omp parallel for schedule(dynamic, 50)
+#endif
   for (j = 0; j < NJ->maxnode; j++) {
     besthit_t *sv = allhits != NULL ? &allhits[j] : &tmp;
     sv->i = node;
     sv->j = j;
     if (NJ->parent[j] >= 0) {
+      sv->i = -1;		/* illegal/empty join */
       sv->weight = 0.0;
       sv->criterion = sv->dist = 1e20;
       continue;
@@ -4789,7 +4988,8 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
   else
     out->vectors = (float*)myrealloc(out->vectors,
 				     /*OLDSIZE*/sizeof(float)*nCodes*nPos,
-				     /*NEWSIZE*/sizeof(float)*nCodes*out->nVectors);
+				     /*NEWSIZE*/sizeof(float)*nCodes*out->nVectors,
+				     /*copy*/true); /* try to save space */
   nProfileFreqAlloc += out->nVectors;
   nProfileFreqAvoid += nPos - out->nVectors;
 
@@ -5235,32 +5435,61 @@ nni_t MLQuartetNNI(profile_t *profiles[4],
   QuartetConstraintPenalties(profiles, nConstraints, /*OUT*/penalty);
   if (penalty[ABvsCD] > penalty[ACvsBD] || penalty[ABvsCD] > penalty[ADvsBC])
     bFast = false;
+#ifdef OPENMP
+      bFast = false;		/* turn off star topology test */
+#endif
 
   for (iRound = 0; iRound < nRounds; iRound++) {
     bool bStarTest = false;
-    criteria[ABvsCD] = MLQuartetOptimize(profiles[0], profiles[1], profiles[2], profiles[3],
-					 nPos, transmat, rates,
-					 /*IN/OUT*/lenABvsCD,
-					 bFast ? &bStarTest : NULL,
-					 /*site_likelihoods*/NULL)
-      - penalty[ABvsCD];	/* subtract penalty b/c we are trying to maximize log lk */
-    if (bStarTest) {
-      nStarTests++;
-      criteria[ACvsBD] = -1e20;
-      criteria[ADvsBC] = -1e20;
-      len[LEN_I] = lenABvsCD[LEN_I];
-      return(ABvsCD);
-    }
-    if (bConsiderAC)
-      criteria[ACvsBD] = MLQuartetOptimize(profiles[0], profiles[2], profiles[1], profiles[3],
-					   nPos, transmat, rates,
-					   /*IN/OUT*/lenACvsBD, NULL, /*site_likelihoods*/NULL)
-	- penalty[ACvsBD];
-    if (bConsiderAD)
-      criteria[ADvsBC] = MLQuartetOptimize(profiles[0], profiles[3], profiles[2], profiles[1],
-					   nPos, transmat, rates,
-					   /*IN/OUT*/lenADvsBC, NULL, /*site_likelihoods*/NULL)
-	- penalty[ADvsBC];
+    {
+#ifdef OPENMP
+      #pragma omp parallel
+      #pragma omp sections
+#endif
+      {
+#ifdef OPENMP
+        #pragma omp section
+#endif
+	{
+	  criteria[ABvsCD] = MLQuartetOptimize(profiles[0], profiles[1], profiles[2], profiles[3],
+					       nPos, transmat, rates,
+					       /*IN/OUT*/lenABvsCD,
+					       bFast ? &bStarTest : NULL,
+					       /*site_likelihoods*/NULL)
+	    - penalty[ABvsCD];	/* subtract penalty b/c we are trying to maximize log lk */
+	}
+
+#ifdef OPENMP
+        #pragma omp section
+#else
+	if (bStarTest) {
+	  nStarTests++;
+	  criteria[ACvsBD] = -1e20;
+	  criteria[ADvsBC] = -1e20;
+	  len[LEN_I] = lenABvsCD[LEN_I];
+	  return(ABvsCD);
+	}
+#endif
+	{
+	  if (bConsiderAC)
+	    criteria[ACvsBD] = MLQuartetOptimize(profiles[0], profiles[2], profiles[1], profiles[3],
+						 nPos, transmat, rates,
+						 /*IN/OUT*/lenACvsBD, NULL, /*site_likelihoods*/NULL)
+	      - penalty[ACvsBD];
+	}
+	
+#ifdef OPENMP
+        #pragma omp section
+#endif
+	{
+	  if (bConsiderAD)
+	    criteria[ADvsBC] = MLQuartetOptimize(profiles[0], profiles[3], profiles[2], profiles[1],
+						 nPos, transmat, rates,
+						 /*IN/OUT*/lenADvsBC, NULL, /*site_likelihoods*/NULL)
+	      - penalty[ADvsBC];
+	}
+      }
+    } /* end parallel sections */
     if (mlAccuracy < 2) {
       /* If clearly worse then ABvsCD, or have short internal branch length and worse, then
          give up */
@@ -5281,7 +5510,7 @@ nni_t MLQuartetNNI(profile_t *profiles[4],
 	  && criteria[ADvsBC] > criteria[ACvsBD] + closeLogLkLimit)
 	break;
     }
-  }
+  } /* end loop over rounds */
 
   if (verbose > 2) {
     fprintf(stderr, "Optimized quartet for %d rounds: ABvsCD %.5f ACvsBD %.5f ADvsBC %.5f\n",
@@ -5514,35 +5743,36 @@ double GTRNegLogLk(double x, void *data) {
   return(-loglk);
 }
 
-void SetMLRates(/*IN/OUT*/NJ_t *NJ, int nRateCategories) {
-  assert(nRateCategories > 0);
-  AllocRateCategories(/*IN/OUT*/&NJ->rates, 1, NJ->nPos); /* set to 1 category of rate 1 */
-  if (nRateCategories == 1) {
-    RecomputeMLProfiles(/*IN/OUT*/NJ);
-    return;
-  }
-  /* site_loglk[nPos*iRate + j] is the log likelihood of site j with rate iRate */
-  double *site_loglk = mymalloc(sizeof(double)*NJ->nPos*nRateCategories);
-  /* save the original branch lengths */
-  float *branchlength = mymalloc(sizeof(float)*NJ->maxnode);
-  int node;
-  for (node = 0; node < NJ->maxnode; node++)
-    branchlength[node] = NJ->branchlength[node];
-
-  double logNCat = log((double)nRateCategories);
+/* Caller must free the resulting vector of n rates */
+float *MLSiteRates(int nRateCategories) {
   /* Even spacing from 1/nRate to nRate */
+  double logNCat = log((double)nRateCategories);
   double logMinRate = -logNCat;
   double logMaxRate = logNCat;
   double logd = (logMaxRate-logMinRate)/(double)(nRateCategories-1);
+
   float *rates = mymalloc(sizeof(float)*nRateCategories);
+  int i;
+  for (i = 0; i < nRateCategories; i++)
+    rates[i] = exp(logMinRate + logd*(double)i);
+  return(rates);
+}
+
+double *MLSiteLikelihoodsByRate(/*IN*/NJ_t *NJ, /*IN*/float *rates, int nRateCategories) {
+  double *site_loglk = mymalloc(sizeof(double)*NJ->nPos*nRateCategories);
+
+  /* save the original rates */
+  assert(NJ->rates.nRateCategories > 0);
+  float *oldRates = NJ->rates.rates;
+  NJ->rates.rates = mymalloc(sizeof(float) * NJ->rates.nRateCategories);
 
   /* Compute site likelihood for each rate */
   int iPos;
   int iRate;
   for (iRate = 0; iRate  < nRateCategories; iRate++) {
-    rates[iRate] = exp(logMinRate + logd*(double)iRate);
-    for (node = 0; node < NJ->maxnode; node++)
-      NJ->branchlength[node] = branchlength[node] * rates[iRate];
+    int i;
+    for (i = 0; i < NJ->rates.nRateCategories; i++)
+      NJ->rates.rates[i] = rates[iRate];
     RecomputeMLProfiles(/*IN/OUT*/NJ);
     double loglk = TreeLogLk(NJ, /*OUT*/&site_loglk[NJ->nPos*iRate]);
     ProgressReport("Site likelihoods with rate category %d of %d", iRate+1, nRateCategories, 0, 0);
@@ -5554,12 +5784,32 @@ void SetMLRates(/*IN/OUT*/NJ_t *NJ, int nRateCategories) {
     }
   }
 
+  /* restore original rates and profiles */
+  myfree(NJ->rates.rates, sizeof(float) * NJ->rates.nRateCategories);
+  NJ->rates.rates = oldRates;
+  RecomputeMLProfiles(/*IN/OUT*/NJ);
+
+  return(site_loglk);
+}
+
+void SetMLRates(/*IN/OUT*/NJ_t *NJ, int nRateCategories) {
+  assert(nRateCategories > 0);
+  AllocRateCategories(/*IN/OUT*/&NJ->rates, 1, NJ->nPos); /* set to 1 category of rate 1 */
+  if (nRateCategories == 1) {
+    RecomputeMLProfiles(/*IN/OUT*/NJ);
+    return;
+  }
+  float *rates = MLSiteRates(nRateCategories);
+  double *site_loglk = MLSiteLikelihoodsByRate(/*IN*/NJ, /*IN*/rates, nRateCategories);
+
   /* Select best rate for each site, correcting for the prior
      For a prior, use a gamma distribution with shape parameter 3, scale 1/3, so
      Prior(rate) ~ rate**2 * exp(-3*rate)
      log Prior(rate) = C + 2 * log(rate) - 3 * rate
   */
   double sumRates = 0;
+  int iPos;
+  int iRate;
   for (iPos = 0; iPos < NJ->nPos; iPos++) {
     int iBest = -1;
     double dBest = -1e20;
@@ -5577,6 +5827,7 @@ void SetMLRates(/*IN/OUT*/NJ_t *NJ, int nRateCategories) {
     NJ->rates.ratecat[iPos] = iBest;
     sumRates += rates[iBest];
   }
+  site_loglk = myfree(site_loglk, sizeof(double)*NJ->nPos*nRateCategories);
 
   /* Force the rates to average to 1 */
   double avgRate = sumRates/NJ->nPos;
@@ -5588,21 +5839,114 @@ void SetMLRates(/*IN/OUT*/NJ_t *NJ, int nRateCategories) {
   NJ->rates.rates = rates;
   NJ->rates.nRateCategories = nRateCategories;
 
-  /* Restore original branch lengths */
-  for (node = 0; node < NJ->maxnode; node++)
-    NJ->branchlength[node] = branchlength[node];
-
   /* Update profiles based on rates */
   RecomputeMLProfiles(/*IN/OUT*/NJ);
 
-  branchlength = myfree(branchlength, sizeof(float)*NJ->maxnode);
-  site_loglk = myfree(site_loglk, sizeof(double)*NJ->nPos*nRateCategories);
-
   if (verbose) {
     fprintf(stderr, "Switched to using %d rate categories (CAT approximation)\n", nRateCategories);
-    fprintf(stderr, "Log-likelihoods may not be comparable across runs\n");
     fprintf(stderr, "Rate categories were divided by %.3f so that average rate = 1.0\n", avgRate);
+    fprintf(stderr, "CAT-based log-likelihoods may not be comparable across runs\n");
+    if (!gammaLogLk)
+      fprintf(stderr, "Use -gamma for approximate but comparable Gamma(20) log-likelihoods\n");
   }
+}
+
+double GammaLogLk(/*IN*/siteratelk_t *s, /*OPTIONAL OUT*/double *gamma_loglk_sites) {
+  int iRate, iPos;
+  double *dRate = mymalloc(sizeof(double) * s->nRateCats);
+  for (iRate = 0; iRate < s->nRateCats; iRate++) {
+    /* The probability density for each rate is approximated by the total
+       density between the midpoints */
+    double pMin = iRate == 0 ? 0.0 :
+      PGamma(s->mult * (s->rates[iRate-1] + s->rates[iRate])/2.0, s->alpha);
+    double pMax = iRate == s->nRateCats-1 ? 1.0 :
+      PGamma(s->mult * (s->rates[iRate]+s->rates[iRate+1])/2.0, s->alpha);
+    dRate[iRate] = pMax-pMin;
+  }
+
+  double loglk = 0.0;
+  for (iPos = 0; iPos < s->nPos; iPos++) {
+    /* Prevent underflow on large trees by comparing to maximum loglk */
+    double maxloglk = -1e20;
+    for (iRate = 0; iRate < s->nRateCats; iRate++) {
+      double site_loglk = s->site_loglk[s->nPos*iRate + iPos];
+      if (site_loglk > maxloglk)
+	maxloglk = site_loglk;
+    }
+    double rellk = 0; /* likelihood scaled by exp(maxloglk) */
+    for (iRate = 0; iRate < s->nRateCats; iRate++) {
+      double lk = exp(s->site_loglk[s->nPos*iRate + iPos] - maxloglk);
+      rellk += lk * dRate[iRate];
+    }
+    double loglk_site = maxloglk + log(rellk);
+    loglk += loglk_site;
+    if (gamma_loglk_sites != NULL)
+      gamma_loglk_sites[iPos] = loglk_site;
+  }
+  dRate = myfree(dRate, sizeof(double)*s->nRateCats);
+  return(loglk);
+}
+
+double OptAlpha(double alpha, void *data) {
+  siteratelk_t *s = (siteratelk_t *)data;
+  s->alpha = alpha;
+  return(-GammaLogLk(s, NULL));
+}
+
+double OptMult(double mult, void *data) {
+  siteratelk_t *s = (siteratelk_t *)data;
+  s->mult = mult;
+  return(-GammaLogLk(s, NULL));
+}
+
+/* Input site_loglk must be for each rate */
+double RescaleGammaLogLk(int nPos, int nRateCats, /*IN*/float *rates, /*IN*/double *site_loglk,
+			 /*OPTIONAL*/FILE *fpLog) {
+  siteratelk_t s = { /*mult*/1.0, /*alpha*/1.0, nPos, nRateCats, rates, site_loglk };
+  double fx, f2x;
+  int i;
+  fx = -GammaLogLk(&s, NULL);
+  if (verbose>2)
+    fprintf(stderr, "Optimizing alpha, starting at loglk %.3f\n", -fx);
+  for (i = 0; i < 10; i++) {
+    ProgressReport("Optimizing alpha round %d", i+1, 0, 0, 0);
+    double start = fx;
+    s.alpha = onedimenmin(0.01, s.alpha, 10.0, OptAlpha, &s, 0.001, 0.001, &fx, &f2x);
+    if (verbose>2)
+      fprintf(stderr, "Optimize alpha round %d to %.3f lk %.3f\n", i+1, s.alpha, -fx);
+    s.mult = onedimenmin(0.01, s.mult, 10.0, OptMult, &s, 0.001, 0.001, &fx, &f2x);
+    if (verbose>2)
+      fprintf(stderr, "Optimize mult round %d to %.3f lk %.3f\n", i+1, s.mult, -fx);
+    if (fx > start - 0.001) {
+      if (verbose>2)
+	fprintf(stderr, "Optimizing alpha & mult converged\n");
+      break;
+    }
+  }
+
+  double *gamma_loglk_sites = mymalloc(sizeof(double) * nPos);
+  double gammaLogLk = GammaLogLk(&s, /*OUT*/gamma_loglk_sites);
+  if (verbose > 0)
+    fprintf(stderr, "Gamma(%d) LogLk = %.3f alpha = %.3f rescaling lengths by %.3f\n",
+	    nRateCats, gammaLogLk, s.alpha, 1/s.mult);
+  if (fpLog) {
+    int iPos;
+    int iRate;
+    fprintf(fpLog, "Gamma%dLogLk\t%.3f\tApproximate\tAlpha\t%.3f\tRescale\t%.3f\n",
+	    nRateCats, gammaLogLk, s.alpha, 1/s.mult);
+    fprintf(fpLog, "Gamma%d\tSite\tLogLk", nRateCats);
+    for (iRate = 0; iRate < nRateCats; iRate++)
+      fprintf(fpLog, "\tr=%.3f", rates[iRate]/s.mult);
+    fprintf(fpLog,"\n");
+    for (iPos = 0; iPos < nPos; iPos++) {
+      fprintf(fpLog, "Gamma%d\t%d\t%.3f", nRateCats, iPos, gamma_loglk_sites[iPos]);
+      for (iRate = 0; iRate < nRateCats; iRate++)
+	fprintf(fpLog, "\t%.3f", site_loglk[nPos*iRate + iPos]);
+      fprintf(fpLog,"\n");
+    }
+  }
+  gamma_loglk_sites = myfree(gamma_loglk_sites, sizeof(double) * nPos);
+  return(1.0/s.mult);
 }
 
 double MLPairOptimize(profile_t *pA, profile_t *pB,
@@ -5979,7 +6323,7 @@ int NNI(/*IN/OUT*/NJ_t *NJ, int iRound, int nRounds, bool useML,
     }
   } /* end postorder traversal */
   traversal = FreeTraversal(traversal,NJ);
-  if (verbose>2) {
+  if (verbose>=2) {
     int nUp = 0;
     for (i = 0; i < NJ->maxnodes; i++)
       if (upProfiles[i] != NULL)
@@ -6606,16 +6950,42 @@ void TestSplitsML(/*IN/OUT*/NJ_t *NJ, /*OUT*/SplitCount_t *splitcount, int nBoot
     double lenACvsBD[5] = {len[LEN_A], len[LEN_C], len[LEN_B], len[LEN_D], len[LEN_I]};   /* Swap B & C */
     double lenADvsBC[5] = {len[LEN_A], len[LEN_D], len[LEN_C], len[LEN_B], len[LEN_I]};   /* Swap B & D */
 
-    /* Lengths are already optimized for ABvsCD */
-    loglk[ABvsCD] = MLQuartetLogLk(profiles[0], profiles[1], profiles[2], profiles[3],
-				   NJ->nPos, NJ->transmat, &NJ->rates, /*IN/OUT*/lenABvsCD,
-				   /*OUT*/site_likelihoods[ABvsCD]);
-    loglk[ACvsBD] = MLQuartetOptimize(profiles[0], profiles[2], profiles[1], profiles[3],
-				      NJ->nPos, NJ->transmat, &NJ->rates, /*IN/OUT*/lenACvsBD, /*pStarTest*/NULL,
-				      /*OUT*/site_likelihoods[ACvsBD]);
-    loglk[ADvsBC] = MLQuartetOptimize(profiles[0], profiles[3], profiles[2], profiles[1],
-				      NJ->nPos, NJ->transmat, &NJ->rates, /*IN/OUT*/lenADvsBC, /*pStarTest*/NULL,
-				      /*OUT*/site_likelihoods[ADvsBC]);
+    {
+#ifdef OPENMP
+      #pragma omp parallel
+      #pragma omp sections
+#endif
+      {
+#ifdef OPENMP
+      #pragma omp section
+#endif
+	{
+	  /* Lengths are already optimized for ABvsCD */
+	  loglk[ABvsCD] = MLQuartetLogLk(profiles[0], profiles[1], profiles[2], profiles[3],
+					 NJ->nPos, NJ->transmat, &NJ->rates, /*IN/OUT*/lenABvsCD,
+					 /*OUT*/site_likelihoods[ABvsCD]);
+	}
+
+#ifdef OPENMP
+      #pragma omp section
+#endif
+	{
+	  loglk[ACvsBD] = MLQuartetOptimize(profiles[0], profiles[2], profiles[1], profiles[3],
+					    NJ->nPos, NJ->transmat, &NJ->rates, /*IN/OUT*/lenACvsBD, /*pStarTest*/NULL,
+					    /*OUT*/site_likelihoods[ACvsBD]);
+	}
+
+#ifdef OPENMP
+      #pragma omp section
+#endif
+	{
+	  loglk[ADvsBC] = MLQuartetOptimize(profiles[0], profiles[3], profiles[2], profiles[1],
+					    NJ->nPos, NJ->transmat, &NJ->rates, /*IN/OUT*/lenADvsBC, /*pStarTest*/NULL,
+					    /*OUT*/site_likelihoods[ADvsBC]);
+	}
+      }
+    }
+
     /* do a second pass on the better alternative if it is close */
     if (loglk[ACvsBD] > loglk[ADvsBC]) {
       if (mlAccuracy > 1 || loglk[ACvsBD] > loglk[ABvsCD] - closeLogLkLimit) {
@@ -6961,7 +7331,7 @@ void SetDistCriterion(/*IN/OUT*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *hit)
   SetCriterion(NJ,nActive,/*IN/OUT*/hit);
 }
 
-void SetCriterion(/*IN/OUT*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join) {
+void SetCriterion(/*IN/UPDATE*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join) {
   if(join->i < 0
      || join->j < 0
      || NJ->parent[join->i] >= 0
@@ -7050,7 +7420,62 @@ void SetOutDistance(NJ_t *NJ, int iNode, int nActive) {
     fprintf(stderr,"OutDist for Node %d %f truth %f profiled %f truth %f pd_err %f\n",
 	    iNode, NJ->outDistances[iNode], total, pdistOutWithoutA, total_pd,fabs(pdistOutWithoutA-total_pd));
   }
+}
 
+top_hits_t *FreeTopHits(top_hits_t *tophits) {
+  if (tophits == NULL)
+    return(NULL);
+  int iNode;
+  for (iNode = 0; iNode < tophits->maxnodes; iNode++) {
+    top_hits_list_t *l = &tophits->top_hits_lists[iNode];
+    if (l->hits != NULL)
+      l->hits = myfree(l->hits, sizeof(hit_t) * l->nHits);
+  }
+  tophits->top_hits_lists = myfree(tophits->top_hits_lists, sizeof(top_hits_list_t) * tophits->maxnodes);
+  tophits->visible = myfree(tophits->visible, sizeof(hit_t*) * tophits->maxnodes);
+  tophits->topvisible = myfree(tophits->topvisible, sizeof(int) * tophits->nTopVisible);
+#ifdef OPENMP
+  for (iNode = 0; iNode < tophits->maxnodes; iNode++)
+    omp_destroy_lock(&tophits->locks[iNode]);
+  tophits->locks = myfree(tophits->locks, sizeof(omp_lock_t) * tophits->maxnodes);
+#endif
+  return(myfree(tophits, sizeof(top_hits_t)));
+}
+
+top_hits_t *InitTopHits(NJ_t *NJ, int m) {
+  int iNode;
+  assert(m > 0);
+  top_hits_t *tophits = mymalloc(sizeof(top_hits_t));
+  tophits->m = m;
+  tophits->q = (int)(0.5 + tophits2Mult * sqrt(tophits->m));
+  if (!useTopHits2nd || tophits->q >= tophits->m)
+    tophits->q = 0;
+  tophits->maxnodes = NJ->maxnodes;
+  tophits->top_hits_lists = mymalloc(sizeof(top_hits_list_t) * tophits->maxnodes);
+  tophits->visible = mymalloc(sizeof(hit_t) * tophits->maxnodes);
+  tophits->nTopVisible = (int)(0.5 + topvisibleMult*m);
+  tophits->topvisible = mymalloc(sizeof(int) * tophits->nTopVisible);
+#ifdef OPENMP
+  tophits->locks = mymalloc(sizeof(omp_lock_t) * tophits->maxnodes);
+  for (iNode = 0; iNode < tophits->maxnodes; iNode++)
+    omp_init_lock(&tophits->locks[iNode]);
+#endif
+  int i;
+  for (i = 0; i < tophits->nTopVisible; i++)
+    tophits->topvisible[i] = -1; /* empty */
+  tophits->topvisibleAge = 0;
+
+  for (iNode = 0; iNode < tophits->maxnodes; iNode++) {
+    top_hits_list_t *l = &tophits->top_hits_lists[iNode];
+    l->nHits = 0;
+    l->hits = NULL;
+    l->hitSource = -1;
+    l->age = 0;
+    hit_t *v = &tophits->visible[iNode];
+    v->j = -1;
+    v->dist = 1e20;
+  }
+  return(tophits);
 }
 
 /* Helper function for sorting in SetAllLeafTopHits,
@@ -7070,7 +7495,7 @@ int CompareSeeds(const void *c1, const void *c2) {
 }
 
 /* Using the seed heuristic and the close global variable */
-void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits) {
+void SetAllLeafTopHits(/*IN/UPDATE*/NJ_t *NJ, /*IN/OUT*/top_hits_t *tophits) {
   double close = tophitsClose;
   if (close < 0) {
     if (fastest && NJ->nSeq >= 50000) {
@@ -7096,174 +7521,341 @@ void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits) {
   CompareSeedNJ = NULL;
   CompareSeedGaps = NULL;
 
-  besthit_t *besthitsSeed = (besthit_t*)mymalloc(sizeof(besthit_t)*NJ->nSeq);
-  besthit_t *besthitsNeighbor = (besthit_t*)mymalloc(sizeof(besthit_t)*2*m);
-  besthit_t bestjoin;
-
   /* For each seed, save its top 2*m hits and then look for close neighbors */
-  assert(2*m <= NJ->nSeq);
+  assert(2 * tophits->m <= NJ->nSeq);
   int iSeed;
   int nHasTopHits = 0;
+#ifdef OPENMP
+  #pragma omp parallel for schedule(dynamic, 50)
+#endif
   for(iSeed=0; iSeed < NJ->nSeq; iSeed++) {
     int seed = seeds[iSeed];
-    if (iSeed > 0 && (iSeed % 100) == 0)
+    if (iSeed > 0 && (iSeed % 100) == 0) {
+#ifdef OPENMP
+      #pragma omp critical
+#endif
       ProgressReport("Top hits for %6d of %6d seqs (at seed %6d)",
 		     nHasTopHits, NJ->nSeq,
 		     iSeed, 0);
-    if (tophits[seed] != NULL) {
+    }
+    if (tophits->top_hits_lists[seed].nHits > 0) {
       if(verbose>2) fprintf(stderr, "Skipping seed %d\n", seed);
       continue;
     }
+
+    besthit_t *besthitsSeed = (besthit_t*)mymalloc(sizeof(besthit_t)*NJ->nSeq);
+    besthit_t *besthitsNeighbor = (besthit_t*)mymalloc(sizeof(besthit_t) * 2 * tophits->m);
+    besthit_t bestjoin;
+
     if(verbose>2) fprintf(stderr,"Trying seed %d\n", seed);
     SetBestHit(seed, NJ, /*nActive*/NJ->nSeq, /*OUT*/&bestjoin, /*OUT*/besthitsSeed);
 
     /* sort & save top hits of self. besthitsSeed is now sorted. */
-    tophits[seed] = SortSaveBestHits(besthitsSeed, seed, /*IN-SIZE*/NJ->nSeq, /*OUT-SIZE*/m);
+    SortSaveBestHits(seed, /*IN/SORT*/besthitsSeed, /*IN-SIZE*/NJ->nSeq,
+		     /*OUT-SIZE*/tophits->m, /*IN/OUT*/tophits);
     nHasTopHits++;
 
     /* find "close" neighbors and compute their top hits */
-    double neardist = besthitsSeed[2*m-1].dist * close;
+    double neardist = besthitsSeed[2 * tophits->m - 1].dist * close;
     /* must have at least average weight, rem higher is better
        and allow a bit more than average, e.g. if we are looking for within 30% away,
        20% more gaps than usual seems OK
        Alternatively, have a coverage requirement in case neighbor is short
+       If fastest, consider the top q/2 hits to be close neighbors, regardless
     */
     double nearweight = 0;
     int iClose;
-    for (iClose = 0; iClose < 2*m; iClose++)
+    for (iClose = 0; iClose < 2 * tophits->m; iClose++)
       nearweight += besthitsSeed[iClose].weight;
-    nearweight = nearweight/(2.0*m); /* average */
+    nearweight = nearweight/(2.0 * tophits->m); /* average */
     nearweight *= (1.0-2.0*neardist/3.0);
     double nearcover = 1.0 - neardist/2.0;
 
     if(verbose>2) fprintf(stderr,"Distance limit for close neighbors %f weight %f ungapped %d\n",
 			  neardist, nearweight, NJ->nPos-nGaps[seed]);
-    for (iClose = 0; iClose < m; iClose++) {
-      besthit_t *closehit = &tophits[seed][iClose];
+    for (iClose = 0; iClose < tophits->m; iClose++) {
+      besthit_t *closehit = &besthitsSeed[iClose];
       int closeNode = closehit->j;
+      if (tophits->top_hits_lists[closeNode].nHits > 0)
+	continue;
+
       /* If within close-distance, or identical, use as close neighbor */
       bool close = closehit->dist <= neardist
 	&& (closehit->weight >= nearweight
 	    || closehit->weight >= (NJ->nPos-nGaps[closeNode])*nearcover);
-      bool identical = closehit->dist == 0
+      bool identical = closehit->dist < 1e-6
 	&& fabs(closehit->weight - (NJ->nPos - nGaps[seed])) < 1e-5
 	&& fabs(closehit->weight - (NJ->nPos - nGaps[closeNode])) < 1e-5;
-      if (tophits[closeNode] == NULL && (close || identical)) {
+      if (useTopHits2nd && iClose < tophits->q && (close || identical)) {
+	nHasTopHits++;
+	nClose2Used++;
+	int nUse = MIN(tophits->q * tophits2Safety, 2 * tophits->m);
+	besthit_t *besthitsClose = mymalloc(sizeof(besthit_t) * nUse);
+	TransferBestHits(NJ, /*nActive*/NJ->nSeq,
+			 closeNode,
+			 /*IN*/besthitsSeed, /*SIZE*/nUse,
+			 /*OUT*/besthitsClose,
+			 /*updateDistance*/true);
+	SortSaveBestHits(closeNode, /*IN/SORT*/besthitsClose,
+			 /*IN-SIZE*/nUse, /*OUT-SIZE*/tophits->q,
+			 /*IN/OUT*/tophits);
+	tophits->top_hits_lists[closeNode].hitSource = seed;
+	besthitsClose = myfree(besthitsClose, sizeof(besthit_t) * nUse);
+      } else if (close || identical || (fastest && iClose < (tophits->q+1)/2)) {
 	nHasTopHits++;
 	nCloseUsed++;
 	if(verbose>2) fprintf(stderr, "Near neighbor %d (rank %d weight %f ungapped %d %d)\n",
-			      closeNode, iClose, tophits[seed][iClose].weight,
+			      closeNode, iClose, besthitsSeed[iClose].weight,
 			      NJ->nPos-nGaps[seed],
 			      NJ->nPos-nGaps[closeNode]);
 
 	/* compute top 2*m hits */
 	TransferBestHits(NJ, /*nActive*/NJ->nSeq,
 			 closeNode,
-			 /*IN*/besthitsSeed, /*SIZE*/2*m,
+			 /*IN*/besthitsSeed, /*SIZE*/2 * tophits->m,
 			 /*OUT*/besthitsNeighbor,
 			 /*updateDistance*/true);
-	tophits[closeNode] = SortSaveBestHits(besthitsNeighbor, closeNode, /*IN-SIZE*/2*m, /*OUT-SIZE*/m);
-	if (verbose>3 && (closeNode%10)==0) {
-	  /* Double-check the top-hit list */
-	  besthit_t best;
-	  SetBestHit(closeNode, NJ, /*nActive*/NJ->nSeq, &best, /*OPTIONAL-ALL*/NULL);
-	  int iBest;
-	  int found = 0;
-	  for (iBest=0; iBest<2*m; iBest++) {
-	    if (tophits[closeNode][iBest].j == best.j) {
-	      found = 1;
-	      break;
-	    }
-	  }
-	  if (found==0) fprintf(stderr,"Missed from %d to %d %f %f gaps %d %d seedgap %d\n",
-				best.i,best.j,best.dist,best.criterion,
-				nGaps[best.i],nGaps[best.j],nGaps[seed]);
-	} /* end double-checking test of closeNode */
-      }	/* end test if should transfer hits */
+	SortSaveBestHits(closeNode, /*IN/SORT*/besthitsNeighbor,
+			 /*IN-SIZE*/2 * tophits->m, /*OUT-SIZE*/tophits->m,
+			 /*IN/OUT*/tophits);
+
+	/* And then try for a second level of transfer. We assume we
+	   are in a good area, because of the 1st
+	   level of transfer, and in a small neighborhood, because q is
+	   small (32 for 1 million sequences), so we do not make any close checks.
+	 */
+	int iClose2;
+	for (iClose2 = 0; iClose2 < tophits->q && iClose2 < 2 * tophits->m; iClose2++) {
+	  int closeNode2 = besthitsNeighbor[iClose2].j;
+	  assert(closeNode2 >= 0);
+	  if (tophits->top_hits_lists[closeNode2].hits == NULL) {
+	    nClose2Used++;
+	    nHasTopHits++;
+	    int nUse = MIN(tophits->q * tophits2Safety, 2 * tophits->m);
+	    besthit_t *besthitsClose2 = mymalloc(sizeof(besthit_t) * nUse);
+	    TransferBestHits(NJ, /*nActive*/NJ->nSeq,
+			     closeNode2,
+			     /*IN*/besthitsNeighbor, /*SIZE*/nUse,
+			     /*OUT*/besthitsClose2,
+			     /*updateDistance*/true);
+	    SortSaveBestHits(closeNode2, /*IN/SORT*/besthitsClose2,
+			     /*IN-SIZE*/nUse, /*OUT-SIZE*/tophits->q,
+			     /*IN/OUT*/tophits);
+	    tophits->top_hits_lists[closeNode2].hitSource = closeNode;
+	    besthitsClose2 = myfree(besthitsClose2, sizeof(besthit_t) * nUse);
+	  } /* end if should do 2nd-level transfer */
+	}
+      }
     } /* end loop over close candidates */
+    besthitsSeed = myfree(besthitsSeed, sizeof(besthit_t)*NJ->nSeq);
+    besthitsNeighbor = myfree(besthitsNeighbor, sizeof(besthit_t) * 2 * tophits->m);
   } /* end loop over seeds */
 
-  for (iNode=0;iNode<NJ->nSeq;iNode++) {
-    assert(tophits[iNode] != NULL);
-    assert(tophits[iNode][0].i == iNode);
-    assert(tophits[iNode][0].j >= 0);
-    assert(tophits[iNode][0].j < NJ->nSeq);
-    assert(tophits[iNode][0].j != iNode);
+  for (iNode=0; iNode<NJ->nSeq; iNode++) {
+    top_hits_list_t *l = &tophits->top_hits_lists[iNode];
+    assert(l->hits != NULL);
+    assert(l->hits[0].j >= 0);
+    assert(l->hits[0].j < NJ->nSeq);
+    assert(l->hits[0].j != iNode);
+    tophits->visible[iNode] = l->hits[0];
   }
-  if (verbose>2) fprintf(stderr, "#Close neighbors among leaves: %ld seeds %ld\n", nCloseUsed, NJ->nSeq-nCloseUsed);
+
+  if (verbose >= 2) fprintf(stderr, "#Close neighbors among leaves: 1st-level %ld 2nd-level %ld seeds %ld\n",
+			    nCloseUsed, nClose2Used, NJ->nSeq-nCloseUsed-nClose2Used);
   nGaps = myfree(nGaps, sizeof(int)*NJ->nSeq);
   seeds = myfree(seeds, sizeof(int)*NJ->nSeq);
-  besthitsSeed = myfree(besthitsSeed, sizeof(besthit_t)*NJ->nSeq);
-  besthitsNeighbor = myfree(besthitsNeighbor, sizeof(besthit_t)*2*m);
+
+  /* Now add a "checking phase" where we ensure that the q or 2*sqrt(m) hits
+     of i are represented in j (if they should be)
+   */
+  long lReplace = 0;
+  int nCheck = tophits->q > 0 ? tophits->q : (int)(0.5 + 2.0*sqrt(tophits->m));
+  for (iNode = 0; iNode < NJ->nSeq; iNode++) {
+    if ((iNode % 100) == 0)
+      ProgressReport("Checking top hits for %6d of %6d seqs",
+		     iNode+1, NJ->nSeq, 0, 0);
+    top_hits_list_t *lNode = &tophits->top_hits_lists[iNode];
+    int iHit;
+    for (iHit = 0; iHit < nCheck && iHit < lNode->nHits; iHit++) {
+      besthit_t bh = HitToBestHit(iNode, lNode->hits[iHit]);
+      SetCriterion(NJ, /*nActive*/NJ->nSeq, /*IN/OUT*/&bh);
+      top_hits_list_t *lTarget = &tophits->top_hits_lists[bh.j];
+
+      /* If this criterion is worse than the nCheck-1 entry of the target,
+	 then skip the check.
+	 This logic is based on assuming that the list is sorted,
+	 which is true initially but may not be true later.
+	 Still, is a good heuristic.
+      */
+      assert(nCheck > 0);
+      assert(nCheck <= lTarget->nHits);
+      besthit_t bhCheck = HitToBestHit(bh.j, lTarget->hits[nCheck-1]);
+      SetCriterion(NJ, /*nActive*/NJ->nSeq, /*IN/OUT*/&bhCheck);
+      if (bhCheck.criterion < bh.criterion)
+	continue;		/* no check needed */
+
+      /* Check if this is present in the top-hit list */
+      int iHit2;
+      bool bFound = false;
+      for (iHit2 = 0; iHit2 < lTarget->nHits && !bFound; iHit2++)
+	if (lTarget->hits[iHit2].j == iNode)
+	  bFound = true;
+      if (!bFound) {
+	/* Find the hit with the worst criterion and replace it with this one */
+	int iWorst = -1;
+	double dWorstCriterion = -1e20;
+	for (iHit2 = 0; iHit2 < lTarget->nHits; iHit2++) {
+	  besthit_t bh2 = HitToBestHit(bh.j, lTarget->hits[iHit2]);
+	  SetCriterion(NJ, /*nActive*/NJ->nSeq, /*IN/OUT*/&bh2);
+	  if (bh2.criterion > dWorstCriterion) {
+	    iWorst = iHit2;
+	    dWorstCriterion = bh2.criterion;
+	  }
+	}
+	if (dWorstCriterion > bh.criterion) {
+	  assert(iWorst >= 0);
+	  lTarget->hits[iWorst].j = iNode;
+	  lTarget->hits[iWorst].dist = bh.dist;
+	  lReplace++;
+	  /* and perhaps update visible */
+	  besthit_t v;
+	  bool bSuccess = GetVisible(NJ, /*nActive*/NJ->nSeq, tophits, bh.j, /*OUT*/&v);
+	  assert(bSuccess);
+	  if (bh.criterion < v.criterion)
+	    tophits->visible[bh.j] = lTarget->hits[iWorst];
+	}
+      }
+    }
+  }
+
+  if (verbose >= 2)
+    fprintf(stderr, "Replaced %ld top hit entries\n", lReplace);
 }
 
 /* Updates out-distances but does not reset or update visible set */
-int GetBestFromTopHits(int iNode,
-			/*IN/OUT*/NJ_t *NJ,
+void GetBestFromTopHits(int iNode,
+			/*IN/UPDATE*/NJ_t *NJ,
 			int nActive,
-			/*IN/UPDATE*/besthit_t *tophits,
-			int nTopHits) {
+			/*IN*/top_hits_t *tophits,
+			/*OUT*/besthit_t *bestjoin) {
+  assert(iNode >= 0);
   assert(NJ->parent[iNode] < 0);
-  int bestIndex = -1;
+  top_hits_list_t *l = &tophits->top_hits_lists[iNode];
+  assert(l->nHits > 0);
+  assert(l->hits != NULL);
+
   if(!fastest)
     SetOutDistance(NJ, iNode, nActive); /* ensure out-distances are not stale */
 
-  int iBest;
-  for(iBest=0; iBest<nTopHits; iBest++) {
-    besthit_t *hit = &tophits[iBest];
-    if(hit->j < 0) continue;	/* empty slot */
-    assert(hit->i == iNode);
+  bestjoin->i = -1;
+  bestjoin->j = -1;
+  bestjoin->dist = 1e20;
+  bestjoin->criterion = 1e20;
 
-    /* Walk up to active node and compute new distance value if necessary */
-    int j = hit->j;
-    while(NJ->parent[j] >= 0) j = NJ->parent[j];
-    if (iNode == j)
-      continue;
-    if(!fastest)
-      SetOutDistance(NJ, j, nActive); /* ensure out-distances are not stale */
-    if (j != hit->j) {
-      hit->j = j;
-      SetDistCriterion(NJ, nActive, /*IN/OUT*/hit);
-    } else {
-      /* Update out distances if needed, and compute criterion */
-      SetCriterion(/*IN/OUT*/NJ, nActive, /*IN/OUT*/hit);
+  int iBest;
+  for(iBest=0; iBest < l->nHits; iBest++) {
+    besthit_t bh = HitToBestHit(iNode, l->hits[iBest]);
+    if (UpdateBestHit(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/&bh, /*update dist*/true)) {
+      SetCriterion(/*IN/OUT*/NJ, nActive, /*IN/OUT*/&bh); /* make sure criterion is correct */
+      if (bh.criterion < bestjoin->criterion)
+	*bestjoin = bh;
     }
-    if (bestIndex < 0)
-      bestIndex = iBest;
-    else if (hit->criterion < tophits[bestIndex].criterion)
-      bestIndex = iBest;
   }
-  assert(bestIndex >= 0);	/* a hit was found */
-  assert(tophits[bestIndex].i == iNode);
-  if (verbose > 5) fprintf(stderr, "BestHit %d %d %f %f\n",
-			   tophits[bestIndex].i, tophits[bestIndex].j,
-			   tophits[bestIndex].dist, tophits[bestIndex].criterion);
-  return(bestIndex);
+  assert(bestjoin->j >= 0);	/* a hit was found */
+  assert(bestjoin->i == iNode);
 }
 
-/* Make a shorter list with only unique entries
-   Also removes "stale" hits to nodes that have parents
-*/
-besthit_t *UniqueBestHits(NJ_t *NJ, int iNode,
-			  besthit_t *combined, int nCombined,
+int ActiveAncestor(/*IN*/NJ_t *NJ, int iNode) {
+  if (iNode < 0)
+    return(iNode);
+  while(NJ->parent[iNode] >= 0)
+    iNode = NJ->parent[iNode];
+  return(iNode);
+}
+
+bool UpdateBestHit(/*IN/UPDATE*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *hit,
+		   bool bUpdateDist) {
+  int i = ActiveAncestor(/*IN*/NJ, hit->i);
+  int j = ActiveAncestor(/*IN*/NJ, hit->j);
+  if (i < 0 || j < 0 || i == j) {
+    hit->i = -1;
+    hit->j = -1;
+    hit->weight = 0;
+    hit->dist = 1e20;
+    hit->criterion = 1e20;
+    return(false);
+  }
+  if (i != hit->i || j != hit->j) {
+    hit->i = i;
+    hit->j = j;
+    if (bUpdateDist) {
+      SetDistCriterion(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/hit);
+    } else {
+      hit->dist = -1e20;
+      hit->criterion = 1e20;
+    }
+  }
+  return(true);
+}
+
+bool GetVisible(/*IN/UPDATE*/NJ_t *NJ, int nActive,
+		/*IN/OUT*/top_hits_t *tophits,
+		int iNode, /*OUT*/besthit_t *visible) {
+  if (iNode < 0 || NJ->parent[iNode] >= 0)
+    return(false);
+  hit_t *v = &tophits->visible[iNode];
+  if (v->j < 0 || NJ->parent[v->j] >= 0)
+    return(false);
+  *visible = HitToBestHit(iNode, *v);
+  SetCriterion(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/visible);  
+  return(true);
+}
+
+besthit_t *UniqueBestHits(/*IN/UPDATE*/NJ_t *NJ, int nActive,
+			  /*IN/SORT*/besthit_t *combined, int nCombined,
 			  /*OUT*/int *nUniqueOut) {
-  qsort(/*IN/OUT*/combined, nCombined, sizeof(besthit_t), CompareHitsByJ);
+  int iHit;
+  for (iHit = 0; iHit < nCombined; iHit++) {
+    besthit_t *hit = &combined[iHit];
+    UpdateBestHit(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/hit, /*update*/false);
+  }
+  qsort(/*IN/OUT*/combined, nCombined, sizeof(besthit_t), CompareHitsByIJ);
 
   besthit_t *uniqueList = (besthit_t*)mymalloc(sizeof(besthit_t)*nCombined);
   int nUnique = 0;
-  int iHit = 0;
+  int iSavedLast = -1;
+
+  /* First build the new list */
   for (iHit = 0; iHit < nCombined; iHit++) {
     besthit_t *hit = &combined[iHit];
-    if(hit->j < 0 || hit->j == iNode || NJ->parent[hit->j] >= 0) continue;
-    assert(hit->i == iNode);
-    if (nUnique > 0 && hit->j == uniqueList[nUnique-1].j) continue;
+    if (hit->i < 0 || hit->j < 0)
+      continue;
+    if (iSavedLast >= 0) {
+      /* toss out duplicates */
+      besthit_t *saved = &combined[iSavedLast];
+      if (saved->i == hit->i && saved->j == hit->j)
+	continue;
+    }
     assert(nUnique < nCombined);
+    assert(hit->j >= 0 && NJ->parent[hit->j] < 0);
     uniqueList[nUnique++] = *hit;
+    iSavedLast = iHit;
   }
   *nUniqueOut = nUnique;
+
+  /* Then do any updates to the criterion or the distances in parallel */
+#ifdef OPENMP
+    #pragma omp parallel for schedule(dynamic, 50)
+#endif
+  for (iHit = 0; iHit < nUnique; iHit++) {
+    besthit_t *hit = &uniqueList[iHit];
+    if (hit->dist < 0.0)
+      SetDistCriterion(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/hit);
+    else
+      SetCriterion(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/hit);
+  }
   return(uniqueList);
 }
-
 
 /*
   Create a top hit list for the new node, either
@@ -7272,247 +7864,401 @@ besthit_t *UniqueBestHits(NJ_t *NJ, int iNode,
   Also update visible set for other nodes if we stumble across a "better" hit
 */
  
-void TopHitJoin(/*IN/OUT*/NJ_t *NJ,
-		int newnode,
+void TopHitJoin(int newnode,
+		/*IN/UPDATE*/NJ_t *NJ,
 		int nActive,
-		int m,
-		/*IN/OUT*/besthit_t **tophits,
-		/*IN/OUT*/int *tophitAge,
-		/*IN/OUT*/besthit_t *visible,
-		/*IN/OUT*/int *topvisible) {
-  besthit_t *combinedList = (besthit_t*)mymalloc(sizeof(besthit_t)*2*m);
+		/*IN/OUT*/top_hits_t *tophits) {
+  long startProfileOps = profileOps;
+  long startOutProfileOps = outprofileOps;
   assert(NJ->child[newnode].nChild == 2);
-  assert(tophits[newnode] == NULL);
+  top_hits_list_t *lNew = &tophits->top_hits_lists[newnode];
+  assert(lNew->hits == NULL);
 
   /* Copy the hits */
-  TransferBestHits(NJ, nActive, newnode, tophits[NJ->child[newnode].child[0]], m,
-		   /*OUT*/combinedList,
-		   /*updateDistance*/false);
-  TransferBestHits(NJ, nActive, newnode, tophits[NJ->child[newnode].child[1]], m,
-		   /*OUT*/combinedList+m,
-		   /*updateDistance*/false);
+  int i;
+  top_hits_list_t *lChild[2];
+  for (i = 0; i< 2; i++) {
+    lChild[i] = &tophits->top_hits_lists[NJ->child[newnode].child[i]];
+    assert(lChild[i]->hits != NULL && lChild[i]->nHits > 0);
+  }
+  int nCombined = lChild[0]->nHits + lChild[1]->nHits;
+  besthit_t *combinedList = (besthit_t*)mymalloc(sizeof(besthit_t)*nCombined);
+  HitsToBestHits(lChild[0]->hits, lChild[0]->nHits, NJ->child[newnode].child[0],
+		 /*OUT*/combinedList);
+  HitsToBestHits(lChild[1]->hits, lChild[1]->nHits, NJ->child[newnode].child[1],
+		 /*OUT*/combinedList + lChild[0]->nHits);
   int nUnique;
-  besthit_t *uniqueList = UniqueBestHits(NJ, newnode, combinedList, 2*m, /*OUT*/&nUnique);
-  combinedList = myfree(combinedList, sizeof(besthit_t)*2*m);
+  /* UniqueBestHits() replaces children (used in the calls to HitsToBestHits)
+     with active ancestors, so all distances & criteria will be recomputed */
+  besthit_t *uniqueList = UniqueBestHits(/*IN/UPDATE*/NJ, nActive,
+					 /*IN/SORT*/combinedList,
+					 nCombined,
+					 /*OUT*/&nUnique);
+  int nUniqueAlloc = nCombined;
+  combinedList = myfree(combinedList, sizeof(besthit_t)*nCombined);
 
   /* Forget the top-hit lists of the joined nodes */
-  int c;
-  for(c = 0; c < NJ->child[newnode].nChild; c++) {
-    int child = NJ->child[newnode].child[c];
-    tophits[child] = myfree(tophits[child], m*sizeof(besthit_t));
+  for (i = 0; i < 2; i++) {
+    lChild[i]->hits = myfree(lChild[i]->hits, sizeof(hit_t) * lChild[i]->nHits);
+    lChild[i]->nHits = 0;
   }
 
-  tophitAge[newnode] = tophitAge[NJ->child[newnode].child[0]];
-  if (tophitAge[newnode] < tophitAge[NJ->child[newnode].child[1]])
-    tophitAge[newnode] = tophitAge[NJ->child[newnode].child[1]];
-  tophitAge[newnode]++;
+  /* Use the average age, rounded up, by 1 Versions 2.0 and earlier
+     used the maximum age, which leads to more refreshes without
+     improving the accuracy of the NJ phase. Intuitively, if one of
+     them was just refreshed then another refresh is unlikely to help.
+   */
+  lNew->age = (lChild[0]->age+lChild[1]->age+1)/2 + 1;
 
-  /* If top hit ages always match, then log2(m) would mean a refresh after
+  /* If top hit ages always match (perfectly balanced), then a
+     limit of log2(m) would mean a refresh after
      m joins, which is about what we want.
   */
-  int tophitAgeLimit = (int)(0.5 + log((double)m)/log(2.0));
-  if (tophitAgeLimit < 1) tophitAgeLimit = 1;
-  tophitAgeLimit++;		/* make it a bit conservative, we have the tophitsRefresh threshold too */
+  int tophitAgeLimit = MAX(1, (int)(0.5 + log((double)tophits->m)/log(2.0)));
 
-  /* Either use the merged list as candidate top hits or do a refresh
+  /* Either use the merged list as candidate top hits, or
+     move from 2nd level to 1st level, or do a refresh
      UniqueBestHits eliminates hits to self, so if nUnique==nActive-1,
      we've already done the exhaustive search.
 
      Either way, we set tophits, visible(newnode), update visible of its top hits,
      and modify topvisible: if we do a refresh, then we reset it, otherwise we update
   */
-  if (nUnique==nActive-1
-      || (nUnique >= (int)(0.5+m*tophitsRefresh)
-	  && tophitAge[newnode] <= tophitAgeLimit)) {
-    if(verbose>2) fprintf(stderr,"Top hits for %d from combined %d nActive=%d tophitsage %d\n",
-			  newnode,nUnique,nActive,tophitAge[newnode]);
-    /* Update distances */
-    int iHit;
-    for (iHit = 0; iHit < nUnique; iHit++)
-      SetDistCriterion(NJ, nActive, /*IN/OUT*/&uniqueList[iHit]);
-    tophits[newnode] = SortSaveBestHits(uniqueList, newnode, /*nIn*/nUnique, /*nOut*/m);
-    visible[newnode] = tophits[newnode][0];
-    ResetVisible(NJ, nActive, tophits[newnode], m, /*IN/OUT*/visible, topvisible);
-    UpdateTopVisible(NJ, visible, /*IN/UPDATE*/topvisible, m, newnode);
+  bool bSecondLevel = lChild[0]->hitSource >= 0 && lChild[1]->hitSource >= 0;
+  bool bUseUnique = nUnique==nActive-1
+    || (lNew->age <= tophitAgeLimit
+	&& nUnique >= (bSecondLevel ? (int)(0.5 + tophits2Refresh * tophits->q)
+		       : (int)(0.5 + tophits->m * tophitsRefresh) ));
+  if (bUseUnique && verbose > 2)
+    fprintf(stderr,"Top hits for %d from combined %d nActive=%d tophitsage %d %s\n",
+	    newnode,nUnique,nActive,lNew->age,
+	    bSecondLevel ? "2ndlevel" : "1stlevel");
+
+  if (!bUseUnique
+      && bSecondLevel
+      && lNew->age <= tophitAgeLimit) {
+    int source = ActiveAncestor(NJ, lChild[0]->hitSource);
+    if (source == newnode)
+      source = ActiveAncestor(NJ, lChild[1]->hitSource);
+    /* In parallel mode, it is possible that we would select a node as the
+       hit-source and then over-write that top hit with a short list.
+       So we need this sanity check.
+    */
+    if (source != newnode
+	&& source >= 0
+	&& tophits->top_hits_lists[source].hitSource < 0) {
+
+      /* switch from 2nd-level to 1st-level top hits -- compute top hits list
+	 of node from what we have so far plus the active source plus its top hits */
+      top_hits_list_t *lSource = &tophits->top_hits_lists[source];
+      assert(lSource->hitSource < 0);
+      assert(lSource->nHits > 0);
+      int nMerge = 1 + lSource->nHits + nUnique;
+      besthit_t *mergeList = mymalloc(sizeof(besthit_t) * nMerge);
+      memcpy(/*to*/mergeList, /*from*/uniqueList, nUnique * sizeof(besthit_t));
+      
+      int iMerge = nUnique;
+      mergeList[iMerge].i = newnode;
+      mergeList[iMerge].j = source;
+      SetDistCriterion(NJ, nActive, /*IN/OUT*/&mergeList[iMerge]);
+      iMerge++;
+      HitsToBestHits(lSource->hits, lSource->nHits, newnode, /*OUT*/mergeList+iMerge);
+      for (i = 0; i < lSource->nHits; i++) {
+	SetDistCriterion(NJ, nActive, /*IN/OUT*/&mergeList[iMerge]);
+	iMerge++;
+      }
+      assert(iMerge == nMerge);
+      
+      uniqueList = myfree(uniqueList, nUniqueAlloc * sizeof(besthit_t));
+      uniqueList = UniqueBestHits(/*IN/UPDATE*/NJ, nActive,
+				  /*IN/SORT*/mergeList,
+				  nMerge,
+				  /*OUT*/&nUnique);
+      nUniqueAlloc = nMerge;
+      mergeList = myfree(mergeList, sizeof(besthit_t)*nMerge);
+      
+      assert(nUnique > 0);
+      bUseUnique = nUnique >= (int)(0.5 + tophits->m * tophitsRefresh);
+      bSecondLevel = false;
+      
+      if (bUseUnique && verbose > 2)
+	fprintf(stderr, "Top hits for %d from children and source %d's %d hits, nUnique %d\n",
+		newnode, source, lSource->nHits, nUnique);
+    }
+  }
+
+  if (bUseUnique) {
+    if (bSecondLevel) {
+      /* pick arbitrarily */
+      lNew->hitSource = lChild[0]->hitSource;
+    }
+    int nSave = MIN(nUnique, bSecondLevel ? tophits->q : tophits->m);
+    assert(nSave>0);
+    if (verbose > 2)
+      fprintf(stderr, "Combined %d ops so far %ld\n", nUnique, profileOps - startProfileOps);
+    SortSaveBestHits(newnode, /*IN/SORT*/uniqueList, /*nIn*/nUnique,
+		     /*nOut*/nSave, /*IN/OUT*/tophits);
+    assert(lNew->hits != NULL); /* set by sort/save */
+    tophits->visible[newnode] = lNew->hits[0];
+    UpdateTopVisible(/*IN*/NJ, nActive, newnode, &tophits->visible[newnode],
+		     /*IN/OUT*/tophits);
+    UpdateVisible(/*IN/UPDATE*/NJ, nActive, /*IN*/uniqueList, nSave, /*IN/OUT*/tophits);
   } else {
     /* need to refresh: set top hits for node and for its top hits */
-    if(verbose>2) fprintf(stderr,"Top hits for %d by refresh (%d unique age %d) nActive=%d\n",
-			  newnode,nUnique,tophitAge[newnode],nActive);
+    if(verbose > 2) fprintf(stderr,"Top hits for %d by refresh (%d unique age %d) nActive=%d\n",
+			  newnode,nUnique,lNew->age,nActive);
     nRefreshTopHits++;
-    tophitAge[newnode] = 0;
+    lNew->age = 0;
 
     int iNode;
-    /* update all out-distances */
+    /* ensure all out-distances are up to date ahead of time
+       to avoid any data overwriting issues.
+    */
+#ifdef OPENMP
+    #pragma omp parallel for schedule(dynamic, 50)
+#endif
     for (iNode = 0; iNode < NJ->maxnode; iNode++) {
-      if (NJ->parent[iNode] < 0)
-	SetOutDistance(/*IN/OUT*/NJ, iNode, nActive);
+      if (NJ->parent[iNode] < 0) {
+	if (fastest) {
+	  besthit_t bh;
+	  bh.i = iNode;
+	  bh.j = iNode;
+	  bh.dist = 0;
+	  SetCriterion(/*IN/UPDATE*/NJ, nActive, &bh);
+	} else {
+	  SetOutDistance(/*IN/UDPATE*/NJ, iNode, nActive);
+	}
+      }
     }
 
     /* exhaustively get the best 2*m hits for newnode, set visible, and save the top m */
     besthit_t *allhits = (besthit_t*)mymalloc(sizeof(besthit_t)*NJ->maxnode);
-    assert(2*m <= NJ->maxnode);
-    SetBestHit(newnode, NJ, nActive, /*OUT*/&visible[newnode], /*OUT*/allhits);
+    assert(2 * tophits->m <= NJ->maxnode);
+    besthit_t bh;
+    SetBestHit(newnode, NJ, nActive, /*OUT*/&bh, /*OUT*/allhits);
     qsort(/*IN/OUT*/allhits, NJ->maxnode, sizeof(besthit_t), CompareHitsByCriterion);
-    tophits[newnode] = SortSaveBestHits(allhits, newnode, /*nIn*/NJ->maxnode, /*nOut*/m);
+    SortSaveBestHits(newnode, /*IN/SORT*/allhits, /*nIn*/NJ->maxnode,
+		     /*nOut*/tophits->m, /*IN/OUT*/tophits);
 
-    /* Do not need to call ResetVisible becaues we will reset visible from its top hits, below */
+    /* Do not need to call UpdateVisible because we set visible below */
 
     /* And use the top 2*m entries to expand other best-hit lists, but only for top m */
-    besthit_t *bothList = (besthit_t*)mymalloc(sizeof(besthit_t)*3*m);
     int iHit;
-    for (iHit=0; iHit < m; iHit++) {
+#ifdef OPENMP
+    #pragma omp parallel for schedule(dynamic, 50)
+#endif
+    for (iHit=0; iHit < tophits->m; iHit++) {
       if (allhits[iHit].i < 0) continue;
       int iNode = allhits[iHit].j;
       assert(iNode>=0);
       if (NJ->parent[iNode] >= 0) continue;
-      tophitAge[iNode] = 0;
+      top_hits_list_t *l = &tophits->top_hits_lists[iNode];
+      int nHitsOld = l->nHits;
+      assert(nHitsOld <= tophits->m);
+      l->age = 0;
 
-      /* Merge */
-      int i;
-      for (i=0;i<m;i++) {
-	bothList[i] = tophits[iNode][i];
-	SetCriterion(/*IN/OUT*/NJ, nActive, /*IN/OUT*/&bothList[i]);
-      }
-      TransferBestHits(NJ, nActive, iNode, /*IN*/allhits, /*nOldHits*/2*m,
-		       /*OUT*/&bothList[m],
-		       /*updateDist*/true);
+      /* Merge: old hits into 0->nHitsOld and hits from iNode above that */
+      besthit_t *bothList = (besthit_t*)mymalloc(sizeof(besthit_t) * 3 * tophits->m);
+      HitsToBestHits(/*IN*/l->hits, nHitsOld, iNode, /*OUT*/bothList); /* does not compute criterion */
+      for (i = 0; i < nHitsOld; i++)
+	SetCriterion(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/&bothList[i]);
+      if (nActive <= 2 * tophits->m)
+	l->hitSource = -1;	/* abandon the 2nd-level top-hits heuristic */
+      int nNewHits = l->hitSource >= 0 ? tophits->q : tophits->m;
+      assert(nNewHits > 0);
+
+      TransferBestHits(/*IN/UPDATE*/NJ, nActive, iNode,
+		       /*IN*/allhits, /*nOldHits*/2 * nNewHits,
+		       /*OUT*/&bothList[nHitsOld],
+		       /*updateDist*/false); /* rely on UniqueBestHits to update dist and/or criterion */
       int nUnique2;
-      besthit_t *uniqueList2 = UniqueBestHits(NJ, iNode, bothList, 3*m, /*OUT*/&nUnique2);
-      tophits[iNode] = myfree(tophits[iNode], m*sizeof(besthit_t));
-      tophits[iNode] = SortSaveBestHits(uniqueList2, iNode, /*nIn*/nUnique2, /*nOut*/m);
-      visible[iNode] = tophits[iNode][0]; /* will update topvisible below */
-      uniqueList2 = myfree(uniqueList2, 3*m*sizeof(besthit_t));
+      besthit_t *uniqueList2 = UniqueBestHits(/*IN/UPDATE*/NJ, nActive,
+					      /*IN/SORT*/bothList, nHitsOld + 2 * nNewHits,
+					      /*OUT*/&nUnique2);
+      assert(nUnique2 > 0);
+      bothList = myfree(bothList,3 * tophits->m * sizeof(besthit_t));
+
+      /* Note this will overwrite l, but we saved nHitsOld */
+      SortSaveBestHits(iNode, /*IN/SORT*/uniqueList2, /*nIn*/nUnique2,
+		       /*nOut*/nNewHits, /*IN/OUT*/tophits);
+      /* will update topvisible below */
+      tophits->visible[iNode] = tophits->top_hits_lists[iNode].hits[0];
+      uniqueList2 = myfree(uniqueList2, (nHitsOld + 2 * tophits->m) * sizeof(besthit_t));
     }
-    ResetTopVisible(NJ, nActive, visible, /*OUT*/topvisible, m);
-    bothList = myfree(bothList,3*m*sizeof(besthit_t));
+
+    ResetTopVisible(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/tophits); /* outside of the parallel phase */
     allhits = myfree(allhits,sizeof(besthit_t)*NJ->maxnode);
   }
-  uniqueList = myfree(uniqueList, 2*m*sizeof(besthit_t));
+  uniqueList = myfree(uniqueList, nUniqueAlloc * sizeof(besthit_t));
+  if (verbose > 2) {
+    fprintf(stderr, "New top-hit list for %d profile-ops %ld (out-ops %ld): source %d age %d members ",
+	    newnode,
+	    profileOps - startProfileOps,
+	    outprofileOps - startOutProfileOps,
+	    lNew->hitSource, lNew->age);
+
+    int i;
+    for (i = 0; i < lNew->nHits; i++)
+      fprintf(stderr, " %d", lNew->hits[i].j);
+    fprintf(stderr,"\n");
+  }
 }
 
-void ResetVisible(NJ_t *NJ, int nActive,
-		   /*IN*/besthit_t *tophits,
+void UpdateVisible(/*IN/UPDATE*/NJ_t *NJ, int nActive,
+		   /*IN*/besthit_t *tophitsNode,
 		   int nTopHits,
-		  /*IN/UPDATE*/besthit_t *visible,
-		  /*OPTIONAL IN/UPDATE*/int *topvisible) {
+		  /*IN/OUT*/top_hits_t *tophits) {
   int iHit;
 
-  /* reset visible set for all top hits of node */
   for(iHit = 0; iHit < nTopHits; iHit++) {
-    besthit_t *hit = &tophits[iHit];
-    if (hit->i < 0) continue;
+    besthit_t *hit = &tophitsNode[iHit];
+    if (hit->i < 0) continue;	/* possible empty entries */
+    assert(NJ->parent[hit->i] < 0);
     assert(hit->j >= 0 && NJ->parent[hit->j] < 0);
-    if (NJ->parent[visible[hit->j].j] >= 0) {
-      /* Visible no longer active, so use this ("reset") */
-      visible[hit->j] = *hit;
-      visible[hit->j].j = visible[hit->j].i;
-      visible[hit->j].i = hit->j;
-      if (topvisible != NULL)
-	UpdateTopVisible(NJ, visible, /*IN/UPDATE*/topvisible, nTopHits, hit->j);
-      if(verbose>5) fprintf(stderr,"NewVisible %d %d %f %f\n",
-			    hit->j,visible[hit->j].j,visible[hit->j].dist,
-			    visible[hit->j].criterion);
-    } else {
-      /* see if this is a better hit -- if it is, "reset" */
-      SetCriterion(/*IN/OUT*/NJ, nActive, /*IN/OUT*/&visible[hit->j]); /* may change out-dists */
-      if (hit->criterion < visible[hit->j].criterion) {
-	visible[hit->j] = *hit;
-	visible[hit->j].j = visible[hit->j].i;
-	visible[hit->j].i = hit->j;
-	if (topvisible != NULL)
-	  UpdateTopVisible(NJ, visible, /*IN/UPDATE*/topvisible, nTopHits, hit->j);
-	if(verbose>5) fprintf(stderr,"ResetVisible %d %d %f %f\n",
-			      hit->j,visible[hit->j].j,visible[hit->j].dist,
-			      visible[hit->j].criterion);
-	nVisibleReset++;
-      }
+    besthit_t visible;
+    bool bSuccess = GetVisible(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/tophits, hit->j, /*OUT*/&visible);
+    if (!bSuccess || hit->criterion < visible.criterion) {
+      if (bSuccess)
+	nVisibleUpdate++;
+      hit_t *v = &tophits->visible[hit->j];
+      v->j = hit->i;
+      v->dist = hit->dist;
+      UpdateTopVisible(NJ, nActive, hit->j, v, /*IN/OUT*/tophits);
+      if(verbose>5) fprintf(stderr,"NewVisible %d %d %f\n",
+			    hit->j,v->j,v->dist);
     }
   } /* end loop over hits */
 }
 
 /* Update the top-visible list to perhaps include visible[iNode] */
-void UpdateTopVisible(/*IN*/NJ_t * NJ,
-		      /*IN*/besthit_t *visible,
-		      /*IN/UPDATE*/int *topvisible,
-		      int m, 	/* length of topvisible */
-		      int iNewNode) {
-  assert(topvisible != NULL);
-
-  /* First, if the list is not full, put it in somewhere;
-     otherwise, remember the worst hit
-  */
-  int iPosWorst = -1;
-  double dCriterionWorst = -1e20;
+void UpdateTopVisible(/*IN*/NJ_t * NJ, int nActive,
+		      int iIn, /*IN*/hit_t *hit,
+		      /*IN/OUT*/top_hits_t *tophits) {
+  assert(tophits != NULL);
+  bool bIn = false; 		/* placed in the list */
   int i;
-  for (i = 0; i < m; i++) {
-    int iNode = topvisible[i];
-    if (iNode < 0 || NJ->parent[iNode] >= 0) {
-      topvisible[i] = iNewNode;
-      return;
-    } else if (visible[iNode].criterion >= dCriterionWorst) {
-      iPosWorst = i;
+
+  /* First, if the list is not full, put it in somewhere */
+  for (i = 0; i < tophits->nTopVisible && !bIn; i++) {
+    int iNode = tophits->topvisible[i];
+    if (iNode == iIn) {
+      /* this node is already in the top hit list */
+      bIn = true;
+    } else if (iNode < 0 || NJ->parent[iNode] >= 0) {
+      /* found an empty spot */
+      bIn = true;
+      tophits->topvisible[i] = iIn;
     }
   }
-  /* Otherwise, may replace worst element in the list */
-  if (visible[iNewNode].criterion < dCriterionWorst) {
-    assert(iPosWorst >= 0);
-    topvisible[iPosWorst] = iNewNode;
+
+  int iPosWorst = -1;
+  double dCriterionWorst = -1e20;
+  if (!bIn) {
+    /* Search for the worst hit */
+    for (i = 0; i < tophits->nTopVisible && !bIn; i++) {
+      int iNode = tophits->topvisible[i];
+      assert(iNode >= 0 && NJ->parent[iNode] < 0 && iNode != iIn);
+      besthit_t visible;
+      if (!GetVisible(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/tophits, iNode, /*OUT*/&visible)) {
+	/* found an empty spot */
+	tophits->topvisible[i] = iIn;
+	bIn = true;
+      } else if (visible.i == hit->j && visible.j == iIn) {
+	/* the reverse hit is already in the top hit list */
+	bIn = true;
+      } else if (visible.criterion >= dCriterionWorst) {
+	iPosWorst = i;
+	dCriterionWorst = visible.criterion;
+      }
+    }
+  }
+
+  if (!bIn && iPosWorst >= 0) {
+    besthit_t visible = HitToBestHit(iIn, *hit);
+    SetCriterion(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/&visible);
+    if (visible.criterion < dCriterionWorst) {
+      if (verbose > 2) {
+	int iOld = tophits->topvisible[iPosWorst];
+	fprintf(stderr, "TopVisible replace %d=>%d with %d=>%d\n",
+		iOld, tophits->visible[iOld].j, visible.i, visible.j);
+      }
+      tophits->topvisible[iPosWorst] = iIn;
+    }
+  }
+
+  if (verbose > 2) {
+    fprintf(stderr, "Updated TopVisible: ");
+    for (i = 0; i < tophits->nTopVisible; i++) {
+      int iNode = tophits->topvisible[i];
+      if (iNode >= 0 && NJ->parent[iNode] < 0) {
+	besthit_t bh = HitToBestHit(iNode, tophits->visible[iNode]);
+	SetDistCriterion(NJ, nActive, &bh);
+	fprintf(stderr, " %d=>%d:%.4f", bh.i, bh.j, bh.criterion);
+      }
+    }
+    fprintf(stderr,"\n");
   }
 }
 
 /* Recompute the topvisible list */
-void ResetTopVisible(/*IN*/NJ_t *NJ,
+void ResetTopVisible(/*IN/UPDATE*/NJ_t *NJ,
 		     int nActive,
-		     /*IN*/besthit_t *visible,
-		     /*OUT*/int *topvisible,
-		     int m) {	/* length of topvisible */
+		     /*IN/OUT*/top_hits_t *tophits) {
   besthit_t *visibleSorted = mymalloc(sizeof(besthit_t)*nActive);
   int nVisible = 0;		/* #entries in visibleSorted */
   int iNode;
   for (iNode = 0; iNode < NJ->maxnode; iNode++) {
-    /* skip joins involving stale nodes or joins we've already saved */
-    if (NJ->parent[iNode] >= 0) continue;
-    assert(visible[iNode].i == iNode);
-    int j = visible[iNode].j;
-    assert(j >= 0);
-    while (NJ->parent[j] >= 0) {
-      j = NJ->parent[j];
+    /* skip joins involving stale nodes */
+    if (NJ->parent[iNode] >= 0)
+      continue;
+    besthit_t v;
+    if (GetVisible(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/tophits, iNode, /*OUT*/&v)) {
+      assert(nVisible < nActive);
+      visibleSorted[nVisible++] = v;
     }
-    if (j < iNode && visible[j].j == iNode) continue;	/* keep only 1 direction of the hit */
-    if (j != visible[iNode].j) {
-      /* we moved up teh list */
-      visible[iNode].j = j;
-      SetDistCriterion(NJ, nActive, /*IN/OUT*/&visible[iNode]);
-    } else {
-      /* just make sure out-distances are up to date */
-      SetCriterion(/*IN/OUT*/NJ, nActive, &visible[iNode]);
-    }
-    assert(nVisible < nActive);
-    visibleSorted[nVisible++] = visible[iNode];
   }
   assert(nVisible > 0);
     
   qsort(/*IN/OUT*/visibleSorted,nVisible,sizeof(besthit_t),CompareHitsByCriterion);
     
-  /* Only keep the top m items, and make sure their out-distances are up to date */
+  /* Only keep the top m items, and try to avoid duplicating i->j with j->i
+     Note that visible(i) -> j does not necessarily imply visible(j) -> i,
+     so we store what the pairing was (or -1 for not used yet)
+   */
+  int *inTopVisible = malloc(sizeof(int) * NJ->maxnodes);
+  int i;
+  for (i = 0; i < NJ->maxnodes; i++)
+    inTopVisible[i] = -1;
+
   if (verbose > 2)
     fprintf(stderr, "top-hit search: nActive %d nVisible %d considering up to %d items\n",
-	    nActive, nVisible, m);
-  if(nVisible > m) nVisible = m;
-    
-  int iBest;
-  for (iBest = 0; iBest < nVisible; iBest++)
-    SetCriterion(/*IN/OUT*/NJ, nActive, /*IN/OUT*/&visibleSorted[iBest]);
-    
-  qsort(/*IN/OUT*/visibleSorted,nVisible,sizeof(besthit_t),CompareHitsByCriterion);
+	    nActive, nVisible, tophits->m);
 
   /* save the sorted indices in topvisible */
-  int i;
-  for (i = 0; i < nVisible; i++)
-    topvisible[i] = visibleSorted[i].i;
-  while(i < m)
-    topvisible[i++] = -1;
+  int iSave = 0;
+  for (i = 0; i < nVisible && iSave < tophits->nTopVisible; i++) {
+    besthit_t *v = &visibleSorted[i];
+    if (inTopVisible[v->i] != v->j) { /* not seen already */
+      tophits->topvisible[iSave++] = v->i;
+      inTopVisible[v->i] = v->j;
+      inTopVisible[v->j] = v->i;
+    }
+  }
+  while(iSave < tophits->nTopVisible)
+    tophits->topvisible[iSave++] = -1;
   myfree(visibleSorted, sizeof(besthit_t)*nActive);
+  myfree(inTopVisible, sizeof(int) * NJ->maxnodes);
+  tophits->topvisibleAge = 0;
+  if (verbose > 2) {
+    fprintf(stderr, "Reset TopVisible: ");
+    for (i = 0; i < tophits->nTopVisible; i++) {
+      int iNode = tophits->topvisible[i];
+      if (iNode < 0)
+	break;
+      fprintf(stderr, " %d=>%d", iNode, tophits->visible[iNode].j);
+    }
+    fprintf(stderr,"\n");
+  }
 }
 
 /*
@@ -7525,55 +8271,47 @@ void ResetTopVisible(/*IN*/NJ_t *NJ,
 	using best-hit lists only, and updating
 	all out-distances in every best-hit list
 */
-void TopHitNJSearch(/*IN/OUT*/NJ_t *NJ, int nActive, int m,
-		    /*IN/OUT*/besthit_t *visible,
-		    /*IN/OUT*/int *topvisible,
-		    /*IN/OUT*/int *topvisibleAge,
-		    /*IN/OUT*/besthit_t **tophits,
+void TopHitNJSearch(/*IN/UPDATE*/NJ_t *NJ, int nActive,
+		    /*IN/OUT*/top_hits_t *tophits,
 		    /*OUT*/besthit_t *join) {
   /* first, do we have at least m/2 candidates in topvisible?
      And remember the best one */
   int nCandidate = 0;
   int iNodeBestCandidate = -1;
   double dBestCriterion = 1e20;
+
   int i;
-  for (i = 0; i < m; i++) {
-    if (topvisible[i] >= 0 && NJ->parent[topvisible[i]] < 0) {
+  for (i = 0; i < tophits->nTopVisible; i++) {
+    int iNode = tophits->topvisible[i];
+    besthit_t visible;
+    if (GetVisible(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/tophits, iNode, /*OUT*/&visible)) {
       nCandidate++;
-      int iNode = topvisible[i];
-      assert(visible[iNode].i == iNode);
-      int j = visible[iNode].j;
-      assert(j >= 0);
-      while (NJ->parent[j] >= 0)
-	j = NJ->parent[j];
-      if (j != visible[iNode].j) {
-	visible[iNode].j = j;
-	SetDistCriterion(NJ, nActive, /*IN/OUT*/&visible[iNode]);
-      } else {
-	/* just make sure out-distances are up to date */
-	SetCriterion(/*IN/OUT*/NJ, nActive, &visible[iNode]);
-      }
-      if (iNodeBestCandidate < 0 || visible[iNode].criterion < dBestCriterion) {
+      if (iNodeBestCandidate < 0 || visible.criterion < dBestCriterion) {
 	iNodeBestCandidate = iNode;
-	dBestCriterion = visible[iNode].criterion;
+	dBestCriterion = visible.criterion;
       }
     }
   }
-  (*topvisibleAge)++;
-  if (2 * (*topvisibleAge) > m ||  (2*nCandidate < m && 2*nCandidate < nActive)) {
+  
+  tophits->topvisibleAge++;
+  /* Note we may have only nActive/2 joins b/c we try to store them once */
+  if (2 * tophits->topvisibleAge > tophits->m
+      || (3*nCandidate < tophits->nTopVisible && 3*nCandidate < nActive)) {
     /* recompute top visible */
     if (verbose > 2)
       fprintf(stderr, "Resetting the top-visible list at nActive=%d\n",nActive);
-    ResetTopVisible(NJ, nActive, visible, /*OUT*/topvisible, m);
-    iNodeBestCandidate = topvisible[0];
-    *topvisibleAge = 0;
-  } else {
-    if (verbose > 2)
-      fprintf(stderr, "Top-visible list size %d (nActive %d m %d)\n",
-	      nCandidate, nActive, m);
+    ResetTopVisible(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/tophits);
+    /* and recurse to try again */
+    TopHitNJSearch(NJ, nActive, tophits, join);
+    return;
   }
+  if (verbose > 2)
+    fprintf(stderr, "Top-visible list size %d (nActive %d m %d)\n",
+	    nCandidate, nActive, tophits->m);
   assert(iNodeBestCandidate >= 0 && NJ->parent[iNodeBestCandidate] < 0);
-  *join = visible[iNodeBestCandidate];
+  bool bSuccess = GetVisible(NJ, nActive, tophits, iNodeBestCandidate, /*OUT*/join);
+  assert(bSuccess);
+  assert(join->i >= 0 && NJ->parent[join->i] < 0);
   assert(join->j >= 0 && NJ->parent[join->j] < 0);
 
   if(fastest)
@@ -7583,28 +8321,30 @@ void TopHitNJSearch(/*IN/OUT*/NJ_t *NJ, int nActive, int m,
   do {
     changed = 0;
 
-    besthit_t *bestI = &tophits[join->i][GetBestFromTopHits(join->i, NJ, nActive, tophits[join->i], m)];
-    assert(bestI->i == join->i);
-    if (bestI->j != join->j && bestI->criterion < join->criterion) {
+    besthit_t bestI;
+    GetBestFromTopHits(join->i, NJ, nActive, tophits, /*OUT*/&bestI);
+    assert(bestI.i == join->i);
+    if (bestI.j != join->j && bestI.criterion < join->criterion) {
       changed = 1;
       if (verbose>2)
 	fprintf(stderr,"BetterI\t%d\t%d\t%d\t%d\t%f\t%f\n",
-		join->i,join->j,bestI->i,bestI->j,
-		join->criterion,bestI->criterion);
-      *join = *bestI;
+		join->i,join->j,bestI.i,bestI.j,
+		join->criterion,bestI.criterion);
+      *join = bestI;
     }
 
-    besthit_t *bestJ = &tophits[join->j][GetBestFromTopHits(join->j, NJ, nActive, tophits[join->j], m)];
-    assert(bestJ->i == join->j);
-    if (bestJ->j != join->i && bestJ->criterion < join->criterion) {
+    besthit_t bestJ;
+    GetBestFromTopHits(join->j, NJ, nActive, tophits, /*OUT*/&bestJ);
+    assert(bestJ.i == join->j);
+    if (bestJ.j != join->i && bestJ.criterion < join->criterion) {
       changed = 1;
       if (verbose>2)
 	fprintf(stderr,"BetterJ\t%d\t%d\t%d\t%d\t%f\t%f\n",
-		join->i,join->j,bestJ->i,bestJ->j,
-		join->criterion,bestJ->criterion);
-      *join = *bestJ;
+		join->i,join->j,bestJ.i,bestJ.j,
+		join->criterion,bestJ.criterion);
+      *join = bestJ;
     }
-    if(changed) nBetter++;
+    if(changed) nHillBetter++;
   } while(changed);
 }
 
@@ -7627,64 +8367,137 @@ int CompareHitsByCriterion(const void *c1, const void *c2) {
   return(0);
 }
 
-int CompareHitsByJ(const void *c1, const void *c2) {
+int CompareHitsByIJ(const void *c1, const void *c2) {
   const besthit_t *hit1 = (besthit_t*)c1;
   const besthit_t *hit2 = (besthit_t*)c2;
-  return hit1->j - hit2->j;
+  return hit1->i != hit2->i ? hit1->i - hit2->i : hit1->j - hit2->j;
 }
 
-besthit_t *SortSaveBestHits(besthit_t *besthits, int iNode, int insize, int outsize) {
-  qsort(/*IN/OUT*/besthits,insize,sizeof(besthit_t),CompareHitsByCriterion);
+void SortSaveBestHits(int iNode, /*IN/SORT*/besthit_t *besthits,
+		      int nIn, int nOut,
+		      /*IN/OUT*/top_hits_t *tophits) {
+  assert(nIn > 0);
+  assert(nOut > 0);
+  top_hits_list_t *l = &tophits->top_hits_lists[iNode];
+  /*  */
+  qsort(/*IN/OUT*/besthits,nIn,sizeof(besthit_t),CompareHitsByCriterion);
 
-  besthit_t *saved = (besthit_t*)mymalloc(sizeof(besthit_t)*outsize);
-  int nSaved = 0;
+  /* First count how many we will save
+     Not sure if removing duplicates is actually necessary.
+   */
+  int nSave = 0;
+  int jLast = -1;
   int iBest;
-  for (iBest = 0; iBest < insize && nSaved < outsize; iBest++) {
+  for (iBest = 0; iBest < nIn && nSave < nOut; iBest++) {
+    if (besthits[iBest].i < 0)
+      continue;
     assert(besthits[iBest].i == iNode);
-    if (besthits[iBest].j != iNode)
-      saved[nSaved++] = besthits[iBest];
+    int j = besthits[iBest].j;
+    if (j != iNode && j != jLast && j >= 0) {
+      nSave++;
+      jLast = j;
+    }
   }
-  /* pad saved list with invalid entries if necessary */
-  for(; nSaved < outsize; nSaved++) {
-    saved[nSaved].i = -1;
-    saved[nSaved].j = -1;
-    saved[nSaved].weight = 0;
-    saved[nSaved].dist = 1e20;
-    saved[nSaved].criterion = 1e20;
+
+  assert(nSave > 0);
+
+#ifdef OPENMP
+  omp_set_lock(&tophits->locks[iNode]);
+#endif
+  if (l->hits != NULL) {
+    l->hits = myfree(l->hits, l->nHits * sizeof(hit_t));
+    l->nHits = 0;
   }
-  return(saved);
+  l->hits = mymalloc(sizeof(hit_t) * nSave);
+  l->nHits = nSave;
+  int iSave = 0;
+  jLast = -1;
+  for (iBest = 0; iBest < nIn && iSave < nSave; iBest++) {
+    int j = besthits[iBest].j;
+    if (j != iNode && j != jLast && j >= 0) {
+      l->hits[iSave].j = j;
+      l->hits[iSave].dist = besthits[iBest].dist;
+      iSave++;
+      jLast = j;
+    }
+  }
+#ifdef OPENMP
+  omp_unset_lock(&tophits->locks[iNode]);
+#endif
+  assert(iSave == nSave);
 }
 
-void TransferBestHits(/*IN/OUT*/NJ_t *NJ,
+void TransferBestHits(/*IN/UPDATE*/NJ_t *NJ,
 		       int nActive,
 		      int iNode,
 		      /*IN*/besthit_t *oldhits,
 		      int nOldHits,
 		      /*OUT*/besthit_t *newhits,
 		      bool updateDistances) {
+  assert(iNode >= 0);
   assert(NJ->parent[iNode] < 0);
 
   int iBest;
   for(iBest = 0; iBest < nOldHits; iBest++) {
-    int j = oldhits[iBest].j;
+    besthit_t *old = &oldhits[iBest];
     besthit_t *new = &newhits[iBest];
-    if(j<0) {			/* empty (invalid) entry */
-      new->i = iNode;
-      new->j = -1;
+    new->i = iNode;
+    new->j = ActiveAncestor(/*IN*/NJ, old->j);
+    new->dist = old->dist;	/* may get reset below */
+    new->weight = old->weight;
+    new->criterion = old->criterion;
+
+    if(new->j < 0 || new->j == iNode) {
       new->weight = 0;
-      new->dist = 1e20;
+      new->dist = -1e20;
       new->criterion = 1e20;
-    } else {
-      /* Move up to an active node */
-      while(NJ->parent[j] >= 0)
-	j = NJ->parent[j];
-      
-      new->i = iNode;
-      new->j = j;
+    } else if (new->i != old->i || new->j != old->j) {
       if (updateDistances)
-	SetDistCriterion(NJ, nActive, /*IN/OUT*/new);
+	SetDistCriterion(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/new);
+      else {
+	new->dist = -1e20;
+	new->criterion = 1e20;
+      }
+    } else {
+      if (updateDistances)
+	SetCriterion(/*IN/UPDATE*/NJ, nActive, /*IN/OUT*/new);
+      else
+	new->criterion = 1e20;	/* leave dist alone */
     }
   }
+}
+
+void HitsToBestHits(/*IN*/hit_t *hits, int nHits, int iNode, /*OUT*/besthit_t *newhits) {
+  int i;
+  for (i = 0; i < nHits; i++) {
+    hit_t *hit = &hits[i];
+    besthit_t *bh = &newhits[i];
+    bh->i = iNode;
+    bh->j = hit->j;
+    bh->dist = hit->dist;
+    bh->criterion = 1e20;
+    bh->weight = -1;		/* not the true value -- we compute these directly when needed */
+  }
+}
+
+besthit_t HitToBestHit(int i, hit_t hit) {
+  besthit_t bh;
+  bh.i = i;
+  bh.j = hit.j;
+  bh.dist = hit.dist;
+  bh.criterion = 1e20;
+  bh.weight = -1;
+  return(bh);
+}
+
+char *OpenMPString(void) {
+#ifdef OPENMP
+  static char buf[100];
+  sprintf(buf, ", OpenMP (%d threads)", omp_get_max_threads());
+  return(buf);
+#else
+  return("");
+#endif
 }
 
 /* Algorithm 26.2.17 from Abromowitz and Stegun, Handbook of Mathematical Functions
@@ -7737,26 +8550,36 @@ void *mymemdup(void *data, size_t sz) {
   return(new);
 }
 
-void *myrealloc(void *data, size_t szOld, size_t szNew) {
+void *myrealloc(void *data, size_t szOld, size_t szNew, bool bCopy) {
   if (data == NULL && szOld == 0)
     return(mymalloc(szNew));
   if (data == NULL || szOld == 0 || szNew == 0) {
     fprintf(stderr,"Empty myrealloc\n");
     exit(1);
   }
-  void *new = realloc(data,szNew);
-  if (new == NULL) {
-    fprintf(stderr, "Out of memory\n");
-    exit(1);
-  }
-  assert(IS_ALIGNED(new));
-  szAllAlloc += (szNew-szOld);
-  mymallocUsed += (szNew-szOld);
+  if (szOld == szNew)
+    return(data);
+  void *new = NULL;
+  if (bCopy) {
+    /* Try to reduce memory fragmentation by allocating anew and copying
+       Seems to help in practice */
+    new = mymemdup(data, szNew);
+    myfree(data, szOld);
+  } else {
+    new = realloc(data,szNew);
+    if (new == NULL) {
+      fprintf(stderr, "Out of memory\n");
+      exit(1);
+    }
+    assert(IS_ALIGNED(new));
+    szAllAlloc += (szNew-szOld);
+    mymallocUsed += (szNew-szOld);
 #ifdef TRACK_MEMORY
     struct mallinfo mi = mallinfo();
     if (mi.arena+mi.hblkhd > maxmallocHeap)
       maxmallocHeap = mi.arena+mi.hblkhd;
 #endif
+  }
   return(new);
 }
 
@@ -7933,6 +8756,127 @@ double onedimenmin(double xmin, double xguess, double xmax, double (*f)(double,v
 	  fprintf(stderr, "onedimenmin reaches optimum f(%.4f) = %.4f f2x %.4f\n", optx, *fx, *f2x);
 	return optx; /* return optimal x */
 } /* onedimenmin */
+
+/* Numerical code for the gamma distribution is modified from the PhyML 3 code
+   (GNU public license) of Stephane Guindon
+*/
+
+double LnGamma (double alpha)
+{
+/* returns ln(gamma(alpha)) for alpha>0, accurate to 10 decimal places.
+   Stirling's formula is used for the central polynomial part of the procedure.
+   Pike MC & Hill ID (1966) Algorithm 291: Logarithm of the gamma function.
+   Communications of the Association for Computing Machinery, 9:684
+*/
+   double x=alpha, f=0, z;
+   if (x<7) {
+      f=1;  z=x-1;
+      while (++z<7)  f*=z;
+      x=z;   f=-(double)log(f);
+   }
+   z = 1/(x*x);
+   return  f + (x-0.5)*(double)log(x) - x + .918938533204673
+	  + (((-.000595238095238*z+.000793650793651)*z-.002777777777778)*z
+	       +.083333333333333)/x;
+}
+
+double IncompleteGamma(double x, double alpha, double ln_gamma_alpha)
+{
+/* returns the incomplete gamma ratio I(x,alpha) where x is the upper
+	   limit of the integration and alpha is the shape parameter.
+   returns (-1) if in error
+   ln_gamma_alpha = ln(Gamma(alpha)), is almost redundant.
+   (1) series expansion     if (alpha>x || x<=1)
+   (2) continued fraction   otherwise
+   RATNEST FORTRAN by
+   Bhattacharjee GP (1970) The incomplete gamma integral.  Applied Statistics,
+   19: 285-287 (AS32)
+*/
+   int i;
+   double p=alpha, g=ln_gamma_alpha;
+   double accurate=1e-8, overflow=1e30;
+   double factor, gin=0, rn=0, a=0,b=0,an=0,dif=0, term=0, pn[6];
+
+   if (x==0) return (0);
+   if (x<0 || p<=0) return (-1);
+
+   factor=(double)exp(p*(double)log(x)-x-g);
+   if (x>1 && x>=p) goto l30;
+   /* (1) series expansion */
+   gin=1;  term=1;  rn=p;
+ l20:
+   rn++;
+   term*=x/rn;   gin+=term;
+
+   if (term > accurate) goto l20;
+   gin*=factor/p;
+   goto l50;
+ l30:
+   /* (2) continued fraction */
+   a=1-p;   b=a+x+1;  term=0;
+   pn[0]=1;  pn[1]=x;  pn[2]=x+1;  pn[3]=x*b;
+   gin=pn[2]/pn[3];
+ l32:
+   a++;  b+=2;  term++;   an=a*term;
+   for (i=0; i<2; i++) pn[i+4]=b*pn[i+2]-an*pn[i];
+   if (pn[5] == 0) goto l35;
+   rn=pn[4]/pn[5];   dif=fabs(gin-rn);
+   if (dif>accurate) goto l34;
+   if (dif<=accurate*rn) goto l42;
+ l34:
+   gin=rn;
+ l35:
+   for (i=0; i<4; i++) pn[i]=pn[i+2];
+   if (fabs(pn[4]) < overflow) goto l32;
+   for (i=0; i<4; i++) pn[i]/=overflow;
+   goto l32;
+ l42:
+   gin=1-factor*gin;
+
+ l50:
+   return (gin);
+}
+
+double PGamma(double x, double alpha)
+{
+  /* scale = 1/alpha */
+  return IncompleteGamma(x*alpha,alpha,LnGamma(alpha));
+}
+
+//helper function to subtract timval structures
+/* Subtract the `struct timeval' values X and Y,
+        storing the result in RESULT.
+        Return 1 if the difference is negative, otherwise 0.  */
+int     timeval_subtract (struct timeval *result, struct timeval *x, struct timeval *y)
+{
+  /* Perform the carry for the later subtraction by updating y. */
+  if (x->tv_usec < y->tv_usec) {
+    int nsec = (y->tv_usec - x->tv_usec) / 1000000 + 1;
+    y->tv_usec -= 1000000 * nsec;
+    y->tv_sec += nsec;
+  }
+  if (x->tv_usec - y->tv_usec > 1000000) {
+    int nsec = (x->tv_usec - y->tv_usec) / 1000000;
+    y->tv_usec += 1000000 * nsec;
+    y->tv_sec -= nsec;
+  }
+  
+  /* Compute the time remaining to wait.
+     tv_usec is certainly positive. */
+  result->tv_sec = x->tv_sec - y->tv_sec;
+  result->tv_usec = x->tv_usec - y->tv_usec;
+  
+  /* Return 1 if result is negative. */
+  return x->tv_sec < y->tv_sec;
+}
+
+double clockDiff(/*IN*/struct timeval *clock_start) {
+  struct timeval time_now, elapsed;
+  gettimeofday(/*OUT*/&time_now,NULL);
+  timeval_subtract(/*OUT*/&elapsed,/*IN*/&time_now,/*IN*/clock_start);
+  return(elapsed.tv_sec + elapsed.tv_usec*1e-6);
+}
+
 
 /* The random number generator is taken from D E Knuth 
    http://www-cs-faculty.stanford.edu/~knuth/taocp.html
@@ -8896,7 +9840,29 @@ distance_matrix_t matrixBLOSUM45 =
   };
 
 /* The JTT92 matrix, D. T. Jones, W. R. Taylor, & J. M. Thorton, CABIOS 8:275 (1992)
-   Derived from the Phylip source code */
+   Derived from the PhyML source code (models.c) by filling in the other side of the symmetric matrix,
+   scaling the entries by the stationary rate (to give the rate of a->b not b|a), to set the diagonals
+   so the rows sum to 0, to rescale the matrix so that the implied rate of evolution is 1.
+   The resulting matrix is the transpose (I think).
+*/
+#if 0   
+{
+  int i,j;
+  for (i=0; i<20; i++)  for (j=0; j<i; j++)  daa[j*20+i] = daa[i*20+j];
+  for (i = 0; i < 20; i++) for (j = 0; j < 20; j++) daa[i*20+j] *= pi[j] / 100.0;
+  double mr = 0;		/* mean rate */
+  for (i = 0; i < 20; i++) {
+    double sum = 0;
+    for (j = 0; j < 20; j++)
+    sum += daa[i*20+j];
+    daa[i*20+i] = -sum;
+    mr += pi[i] * sum;
+  }
+  for (i = 0; i < 20*20; i++)
+    daa[i] /= mr;
+}
+#endif
+
 double statJTT92[MAXCODES] = {0.07674789,0.05169087,0.04264509,0.05154407,0.01980301,0.04075195,0.06182989,0.07315199,0.02294399,0.05376110,0.09190390,0.05867583,0.02382594,0.04012589,0.05090097,0.06876503,0.05856501,0.01426057,0.03210196,0.06600504};
 double matrixJTT92[MAXCODES][MAXCODES] = {
   { -1.247831,0.044229,0.041179,0.061769,0.042704,0.043467,0.08007,0.136501,0.02059,0.027453,0.022877,0.02669,0.041179,0.011439,0.14794,0.288253,0.362223,0.006863,0.008388,0.227247 },
