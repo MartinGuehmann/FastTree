@@ -261,7 +261,7 @@
 #define IS_ALIGNED(X) 1
 #endif
 
-#define FT_VERSION "2.0.0"
+#define FT_VERSION "2.0.1"
 
 char *usage =
   "  FastTree protein_alignment > tree\n"
@@ -3507,7 +3507,9 @@ alignment_t *ReadAlignment(/*IN*/FILE *fp) {
   for (i = 0; i < nSeq; i++) {
     int seqlen = strlen(seqs[i]);
     if (seqlen != nPos) {
-      fprintf(stderr, "Wrong number of characters for %s: expected %d have %d\n", names[i], nPos, seqlen);
+      fprintf(stderr, "Wrong number of characters for %s: expected %d but have %d instead.\n"
+	      "This sequence may be truncated, or another sequence may be too long.\n",
+	      names[i], nPos, seqlen);
       exit(1);
     }
   }
@@ -4555,7 +4557,16 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
 	     fcode = 1/4 + w1*3/4 or w = (f-1/4)*4/3
 	   */
 	  out->weights[i] = (pcode - 0.25) * 4.0/3.0;
-	  assert(out->weights[i] > 0);
+	  /* This can be zero because of numerical problems, I think */
+	  if (out->weights[i] < 1e-6) {
+	    if (verbose > 1)
+	      fprintf(stderr, "Replaced weight %f with %f from w1 %f w2 %f PSame %f %f f12code %f f12other %f\n",
+		      out->weights[i], 1e-6,
+		      w1, w2,
+		      PSame1[iRate], PSame2[iRate],
+		      f12code, f12other);
+	    out->weights[i] = 1e-6;
+	  }
 	  continue;
 	}
       }
@@ -5569,8 +5580,6 @@ void SetMLRates(/*IN/OUT*/NJ_t *NJ, int nRateCategories) {
 
   /* Force the rates to average to 1 */
   double avgRate = sumRates/NJ->nPos;
-  if (verbose > 1)
-    fprintf(stderr, "Average of selected rate categories was %.3f\n", avgRate);
   for (iRate = 0; iRate < nRateCategories; iRate++)
     rates[iRate] /= avgRate;
   
@@ -5592,6 +5601,7 @@ void SetMLRates(/*IN/OUT*/NJ_t *NJ, int nRateCategories) {
   if (verbose) {
     fprintf(stderr, "Switched to using %d rate categories (CAT approximation)\n", nRateCategories);
     fprintf(stderr, "Log-likelihoods may not be comparable across runs\n");
+    fprintf(stderr, "Rate categories were divided by %.3f so that average rate = 1.0\n", avgRate);
   }
 }
 
