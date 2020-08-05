@@ -343,7 +343,7 @@ typedef float numeric_t;
 
 #endif /* USE_SSE3 */
 
-#define FT_VERSION "2.1.9"
+#define FT_VERSION "2.1.10"
 
 char *usage =
   "  FastTree protein_alignment > tree\n"
@@ -1380,6 +1380,7 @@ typedef struct {
   double freq[4];
   double rates[6];
   int iRate;			/* which rate to set x from */
+  FILE *fpLog; /* OPTIONAL WRITE */
 } gtr_opt_t;
 
 /* Returns -log_likelihood for the tree with the given rates
@@ -5848,11 +5849,14 @@ void SetMLGtr(/*IN/OUT*/NJ_t *NJ, /*OPTIONAL IN*/double *freq_in, /*OPTIONAL WRI
   assert(nCodes==4);
   gtr_opt_t gtr;
   gtr.NJ = NJ;
+  gtr.fpLog = fpLog;
   if (freq_in != NULL) {
     for (i=0; i<4; i++)
       gtr.freq[i]=freq_in[i];
   } else {
-    int n[4] = {1,1,1,1};	/* pseudocounts */
+    /* n[] and sum were int in FastTree 2.1.9 and earlier -- this
+       caused gtr analyses to fail on analyses with >2e9 positions */
+    long n[4] = {1,1,1,1};	/* pseudocounts */
     for (i=0; i<NJ->nSeq; i++) {
       unsigned char *codes = NJ->profiles[i]->codes;
       int iPos;
@@ -5860,7 +5864,7 @@ void SetMLGtr(/*IN/OUT*/NJ_t *NJ, /*OPTIONAL IN*/double *freq_in, /*OPTIONAL WRI
 	if (codes[iPos] < 4)
 	  n[codes[iPos]]++;
     }
-    int sum = n[0]+n[1]+n[2]+n[3];
+    long sum = n[0]+n[1]+n[2]+n[3];
     for (i=0; i<4; i++)
       gtr.freq[i] = n[i]/(double)sum;
   }
@@ -5903,6 +5907,7 @@ void SetMLGtr(/*IN/OUT*/NJ_t *NJ, /*OPTIONAL IN*/double *freq_in, /*OPTIONAL WRI
 }
 
 double GTRNegLogLk(double x, void *data) {
+  
   gtr_opt_t *gtr = (gtr_opt_t*)data;
   assert(nCodes == 4);
   assert(gtr->NJ != NULL);
@@ -5915,6 +5920,12 @@ double GTRNegLogLk(double x, void *data) {
     rates[i] = gtr->rates[i];
   rates[gtr->iRate] = x;
 
+  FILE *fpLog = gtr->fpLog;
+  if (fpLog)
+    fprintf(fpLog, "GTR_Opt\tfreq %.5f %.5f %.5f %.5f rates %.5f %.5f %.5f %.5f %.5f %.5f\n",
+          gtr->freq[0], gtr->freq[1], gtr->freq[2], gtr->freq[3],
+          rates[0], rates[1], rates[2], rates[3], rates[4], rates[5]);
+
   gtr->NJ->transmat = CreateGTR(rates, gtr->freq);
   RecomputeMLProfiles(/*IN/OUT*/gtr->NJ);
   double loglk = TreeLogLk(gtr->NJ, /*site_loglk*/NULL);
@@ -5923,7 +5934,10 @@ double GTRNegLogLk(double x, void *data) {
   /* Do not recompute profiles -- assume the caller will do that */
   if (verbose > 2)
     fprintf(stderr, "GTR LogLk(%.5f %.5f %.5f %.5f %.5f %.5f) = %f\n",
-	    rates[0], rates[1], rates[2], rates[3], rates[4], rates[5], loglk); 
+	    rates[0], rates[1], rates[2], rates[3], rates[4], rates[5], loglk);
+  if (fpLog)
+    fprintf(fpLog, "GTR_Opt\tGTR LogLk(%.5f %.5f %.5f %.5f %.5f %.5f) = %f\n",
+	    rates[0], rates[1], rates[2], rates[3], rates[4], rates[5], loglk);
   return(-loglk);
 }
 
