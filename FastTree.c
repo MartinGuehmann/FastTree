@@ -1,5 +1,7 @@
 /*
- * FastTree -- neighbor joining for multiple sequence alignments using profiles
+ * FastTree -- inferring minimum-evolution trees from multiple sequence alignments
+ * by using profiles.
+ *
  * Morgan N. Price, 2008-2009
  * http://www.microbesonline.org/fasttree/
  *
@@ -34,8 +36,8 @@
 /*
  * To compile FastTree, do:
  * cc -O2 -lm -o FastTree FastTree.c
- * Use -DTRACK_MEMORY if you want it to report its memory usage
- * (but results are not correct above 4GB because mallinfo stores int values)
+ * Use -DTRACK_MEMORY if you want it to report its memory usage,
+ * but results are not correct above 4GB because mallinfo stores int values
  *
  * To get usage guidance, do:
  * FastTree -help
@@ -74,7 +76,7 @@
  * eigenvector matrix.
  *
  * The exhaustive approach (-slow) takes O(N**3*L*a) time, but
- * this can be reduced to as little as O(N**2*log(N) + N**(3/2)*L*a) time
+ * this can be reduced to as little as O(N**(3/2)*log(N)*L*a) time
  * by using heuristics.
  *
  * It uses a combination of three heuristics: a visible set similar to
@@ -182,8 +184,10 @@
  * we only inspect the top m=sqrt(N) entries. We then update those
  * out-distances (up to 2*m*L*a work) and then find the best hit.
  *
- * FastTree does sort the entire visible set, however, which is
- * O(N*log(N)) work per iteration, or O(N**2*log(N)) work total.
+ * To avoid searching the entire visible set, FastTree keeps
+ * and updates a list of the top sqrt(N) entries in the visible set.
+ * This costs O(sqrt(N)) time per join to find the best entry and to
+ * update, or (N sqrt(N)) time overall.
  *
  * Similarly, when doing the local hill-climbing, we avoid O(N*L) work
  * by only considering the top-hits for the current node. So this adds
@@ -205,7 +209,10 @@
  * Finally, during these processes we update the visible sets for
  * other nodes with better hits if we find them, and we set the
  * visible entry for the new joined node to the best entry in its
- * top-hit list.
+ * top-hit list. (And whenever we update a visible entry, we
+ * do O(sqrt(N)) work to update the top-visible list.)
+ * These udpates are not common so they do not alter the
+ * O(N sqrt(N) log(N) L a) total running time for the joining phase.
  */
 
 #include <stdio.h>
@@ -216,20 +223,38 @@
 #include <stdlib.h>
 #include <time.h>
 #include <ctype.h>
+#include <unistd.h>
 #ifdef TRACK_MEMORY
 /* malloc.h apparently doesn't exist on MacOS */
 #include <malloc.h>
 #endif
 
 char *usage =
-  "Usage for FastTree version 1.0.5:\n"
+  "Usage for FastTree version 1.1.0:\n"
+  "  FastTree protein_alignment > tree\n"
+  "  FastTree -nt nucleotide_alignment > tree\n"
+  "  FastTree -nt < nucleotide_alignment > tree\n"
+  "FastTree accepts alignments in fasta or phylip interleaved formats\n"
+  "\n"
+  "Common options (must be before the alignment file):\n"
+  "  -quiet to suppress most reporting information\n"
+  "  -pseudo to use pseudocounts (useful for highly gapped sequences)\n"
+  "  -constraints constraintAlignment to constrain the topology search\n"
+  "       constraintAlignment should have 1s or 0s to indicates splits\n"
+  "  -noboot to not compute the 'local bootstrap'\n"
+  "  -n <number> if the input has multiple alignments (phylip format only)\n"
+  "  -intree newick_file to set the starting tree(s)\n"
+  "  -intree1 newick_file to use this starting tree for all the alignments\n"
+  "Use FastTree -expert to see detailed documentation and more options\n";
+
+char *expertUsage =
   "FastTree [ -nt] [-n 100] [-pseudo | -pseudo 1.0]  [-boot 1000] [-quiet]\n"
   "           [-intree starting_trees_file | -intree1 starting_tree_file]\n"
-  "           [-nni 10] [-slow | -fastest] [-seed 1253] \n"
+  "           [-nni 10] [-spr 2] [-slow | -fastest] [-seed 1253] \n"
   "           [-top | -notop] [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
   "           [-matrix Matrix | -nomatrix] [-nj | -bionj]\n"
   "           [-nt] \n"
-  "           [ -constraints constraintAlignment [ -constraintsWeight 10.0 ] ]\n"
+  "           [ -constraints constraintAlignment [ -constraintWeight 10.0 ] ]\n"
   "         [ alignment_file ]\n"
   "        > newick_tree\n"
   "\n"
@@ -264,19 +289,22 @@ char *usage =
   "      if analyzing the alignment has sequences with little or no overlap.\n"
   "      If the weight is not specified, it is 1.0\n"
   "\n"
-  "Nearest-neighbor interchanges:\n"
-  "  By default, FastTree tries to improve the tree by doing log2(N)+1\n"
+  "Topology search:\n"
+  "  By default, FastTree tries to improve the tree by doing 2*log2(N)\n"
   "  rounds of nearest-neighbor interchanges (NNI), where N is the number of\n"
-  "  unique sequences. Use -nni to set the number of rounds of NNI. If\n"
-  "  FastTree reports 'Bad splits: 0' then additional rounds will probably\n"
+  "  unique sequences, and 2 rounds of subtree-prune-regraft (SPR) moves\n"
+  "  Use -nni to set the number of rounds of NNI and -spr to set the rounds of SPRs.\n"
+  "  -nni 0 will turn off both NNIs and SPRs\n"
+  "  If FastTree reports 'Bad splits: 0' then additional rounds of NNIs will probably\n"
   "  have no effect.\n"
+  "  -sprlength set the maximum length of a SPR move (default 10)\n"
   "\n"
   "Support value options:\n"
   "  by default, FastTree computes a local bootstrap with 1,000 resamples.\n"
   "  The support values are proportions ranging from 0 to 1\n"
   "  The local bootstrap does not recompute topologies, so it is very fast\n"
   "\n"
-  "  Use -boot 0 to turn off bootstrap or -boot 100 to use 100 resamples\n"
+  "  Use -noboot to turn off bootstrap or -boot 100 to use 100 resamples\n"
   "  Use -seed to initialize the random number generator\n"
   "\n"
   "Searching for the best join:\n"
@@ -287,6 +315,8 @@ char *usage =
   "  -fastest -- search the visible set (the top hit for each node) only\n"
   "      Unlike the original fast neighbor-joining, -fastest updates visible(C)\n"
   "      after joining A and B if join(AB,C) is better than join(C,visible(C))\n"
+  "      -fastest also updates out-distances in a very lazy way\n"
+  "      -fastest also sets the top-hits heuristic (-close) to be more aggressive\n"
   "\n"
   "Top-hit heuristics:\n"
   "  by default, FastTree uses a top-hit list to speed up search\n"
@@ -304,9 +334,9 @@ char *usage =
   "         or if the age of the top-hit list is log2(m) or greater\n"
   "\n"
   "Join options:\n"
-  "  -bionj: weighted joins as in BIONJ (default)\n"
+  "  -nj: regular (unweighted) neighbor-joining (default)\n"
+  "  -bionj: weighted joins as in BIONJ\n"
   "          FastTree will also weight joins during NNIs\n"
-  "  -nj: regular (unweighted) neighbor-joining\n"
   "\n"
   "Constrained topology search options:\n"
   "  -constraints alignmentfile -- an alignment with values of 0, 1, and -\n"
@@ -321,7 +351,9 @@ char *usage =
 
 #define MAXCODES 20
 #define NOCODE 127
-#define BUFFER_SIZE 1000
+/* Note -- sequence lines longer than BUFFER_SIZE are
+   allowed, but FASTA header lines must be within this limit */
+#define BUFFER_SIZE 5000
 
 typedef struct {
   int nPos;
@@ -375,7 +407,10 @@ typedef struct {
   float criterion;		/* changes when we update the out-profile or change nActive */
 } besthit_t;
 
-typedef struct { int nChild; int child[3]; } children_t;
+typedef struct {
+  int nChild;
+  int child[3];
+} children_t;
 
 typedef struct {
   /* Distances between amino acids */
@@ -455,17 +490,28 @@ typedef struct {
 /* Describes which switch to do */
 typedef enum {ABvsCD,ACvsBD,ADvsBC} nni_t;
 
+/* A list of these describes a chain of NNI moves in a rooted tree,
+   making up, in total, an SPR move
+*/
+typedef struct {
+  int nodes[2];
+  double deltaLength;		/* change in tree length for this step (lower is better) */
+} spr_step_t;
+
 /* Global variables */
 /* Options */
 int verbose = 1;
 int slow = 0;
 int fastest = 0;
-int bionj = 1;
+int bionj = 0;
 double tophitsMult = 1.0;	/* 0 means compare nodes to all other nodes */
-double tophitsClose = 0.75;	/* Parameter for how close is close; also used as a coverage req. */
+double tophitsClose = -1.0;	/* Parameter for how close is close; also used as a coverage req. */
 double tophitsRefresh = 0.8;	/* Refresh if fraction of top-hit-length drops to this */
-double staleOutLimit = 0.02;	/* nActive changes by at most this amount before we recompute */
-int nRecomputeOutProfile = 200;	/* Recompute out-profile every this many joins (avoid roundoff) */
+double staleOutLimit = 0.01;	/* nActive changes by at most this amount before we recompute 
+				   an out-distance. (Only applies if using the top-hits heuristic) */
+double fResetOutProfile = 0.02;	/* Recompute out profile from scratch if nActive has changed
+				   by more than this proportion, and */
+int nResetOutProfile = 200;	/* nActive has also changed more than this amount */
 int nBootstrap = 1000;		/* If set, number of replicates of local bootstrap to do */
 int nCodes=20;			/* 20 if protein, 4 if nucleotide */
 bool useMatrix=true;		/* If false, use %different as the uncorrected distance */
@@ -483,12 +529,14 @@ double constraintWeight = 10.0; /* Cost of violation of a topological constraint
 long profileOps = 0;		/* Full profile-based distance operations */
 long outprofileOps = 0;		/* How many of profileOps are comparisons to outprofile */
 long seqOps = 0;		/* Faster leaf-based distance operations */
+long profileAvgOps = 0;		/* Number of profile-average steps */
 long nBetter = 0;		/* Number of hill-climbing steps */
 long nCloseUsed = 0;		/* Number of "close" neighbors we avoid full search for */
 long nRefreshTopHits = 0;	/* Number of full-blown searches (interior nodes) */
 long nVisibleReset = 0;		/* Number of resets of the visible set */
 long nNNI = 0;			/* Number of NNI changes performed */
-long nSuboptimalSplits = 0;	/* Number of splits that are rejected given full topology (during bootstrap) */
+long nSPR = 0;			/* Number of SPR changes performed */
+long nSuboptimalSplits = 0;	/* # of splits that are rejected given final tree (during bootstrap) */
 long nSuboptimalConstrained = 0; /* Bad splits that are due to constraints */
 long nConstraintViolations = 0;	/* Number of constraint violations */
 long nProfileFreqAlloc = 0;
@@ -515,8 +563,15 @@ NJ_t *InitNJ(char **sequences, int nSeqs, int nPos,
 NJ_t *FreeNJ(NJ_t *NJ); /* returns NULL */
 void FastNJ(/*IN/OUT*/NJ_t *NJ); /* Does the joins */
 void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ);	  /* Estimates the reliability of the joins */
-void NNI(/*IN/OUT*/NJ_t *NJ);  /* Nearest-neighbor interchanges */
+
+/* One round of nearest-neighbor interchanges */
+void NNI(/*IN/OUT*/NJ_t *NJ, int iRound, int nRounds); 
+
+/* One round of subtree-prune-regraft moves */
+void SPR(/*IN/OUT*/NJ_t *NJ, int maxSPRLength, int iRound, int nRounds);
+
 void UpdateBranchLengths(/*IN/OUT*/NJ_t *NJ); /* Recomputes all branch lengths */
+double TreeLength(/*IN/OUT*/NJ_t *NJ, bool recomputeProfiles); /*Also branch lengths*/
 
 typedef struct {
   int nBadSplits;
@@ -533,20 +588,23 @@ void TestSplits(NJ_t *NJ, /*OUT*/SplitCount_t *splitcount);
 void SetOutDistance(/*IN/UPDATE*/NJ_t *NJ, int iNode, int nActive);
 
 /* Always sets join->criterion; may update NJ->outDistance and NJ->nOutDistActive,
-   assumes join's weight and distance are already set.
-   Also adds the constraint penalty
+   assumes join's weight and distance are already set,
+   and that the constraint penalty (if any) is included in the distance
 */
 void SetCriterion(/*IN/UPDATE*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join);
 
-/* Always recomputes the constraint penalty, because it changes over time */
-double JoinConstraintPenalty(/*IN*/NJ_t *NJ, int nActive, int node1, int node2);
-double JoinConstraintPenaltyPiece(NJ_t *NJ, int nActive, int node1, int node2, int iConstraint);
+/* Compute the constraint penalty for a join. This is added to the "distance"
+   by SetCriterion */
+int JoinConstraintPenalty(/*IN*/NJ_t *NJ, int node1, int node2);
+int JoinConstraintPenaltyPiece(NJ_t *NJ, int node1, int node2, int iConstraint);
 
-/* Helper function for computing distances between profiles of a constraint,
-   represented as counts of on and off */
-double PairConstraintDistance(int nOn1, int nOff1, int nOn2, int nOff2);
+/* Helper function for computing the number of constraints violated by
+   a split, represented as counts of on and off on each side */
+int SplitConstraintPenalty(int nOn1, int nOff1, int nOn2, int nOff2);
 
-/* Computes weight and distance and then sets the criterion (maybe update out-distances) */
+/* Computes weight and distance (which includes the constraint penalty)
+   and then sets the criterion (maybe update out-distances)
+*/
 void SetDistCriterion(/*IN/UPDATE*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join);
 
 /* Reports the support for the (1,2) vs. (3,4) split
@@ -560,7 +618,8 @@ double SplitSupport(profile_t *p1, profile_t *p2, profile_t *p3, profile_t *p4,
 profile_t *SeqToProfile(/*IN/OUT*/NJ_t *NJ,
 			char *seq, int nPos,
 			/*OPTIONAL*/char *constraintSeqs, int nConstraints,
-			int iNode);
+			int iNode,
+			unsigned long counts[256]);
 
 /* ProfileDist and SeqDist only set the dist and weight fields
    If using an outprofile, use the second argument of ProfileDist
@@ -586,10 +645,18 @@ void CorrectedPairDistances(profile_t **profiles, int nProfiles,
 			    int nPos,
 			    /*OUT*/double *distances);
 
-/* output is indexed by nni_t. Note that splits that do not violate any constraints will probably
-   still have penalties, but the relative penalties of the 3 NNIs will be correct.
+/* output is indexed by nni_t
+   To ensure good behavior while evaluating a subtree-prune-regraft move as a series
+   of nearest-neighbor interchanges, this uses a distance-ish model of constraints,
+   as given by PairConstraintDistance(), rather than
+   counting the number of violated splits (which is what FastTree does
+   during neighbor-joining).
+   Thus, penalty values may well be >0 even if no constraints are violated, but the
+   relative scores for the three NNIs will be correct.
  */
 void QuartetConstraintPenalties(profile_t *profiles[4], int nConstraints, /*OUT*/double d[3]);
+
+double PairConstraintDistance(int nOn1, int nOff1, int nOn2, int nOff2);
 
 /* the split is consistent with the constraint if any of the profiles have no data
    or if three of the profiles have the same uniform value (all on or all off)
@@ -598,9 +665,9 @@ void QuartetConstraintPenalties(profile_t *profiles[4], int nConstraints, /*OUT*
 bool SplitViolatesConstraint(profile_t *profiles[4], int iConstraint);
 
 /* If false, no values were set because this constraint was not relevant.
-   output is for all pairs
+   output is for the 3 splits
 */
-bool QuartetConstraintPenaltiesPiece(profile_t *profiles[4], int iConstraint, /*OUT*/double penalty[6]);
+bool QuartetConstraintPenaltiesPiece(profile_t *profiles[4], int iConstraint, /*OUT*/double penalty[3]);
 
 /* Apply Jukes-Cantor or scoredist-like log(1-d) transform
    to correct the distance for multiple substitutions.
@@ -616,6 +683,13 @@ profile_t *AverageProfile(profile_t *profile1, profile_t *profile2,
 			  int nPos, int nConstraints,
 			  distance_matrix_t *distance_matrix,
 			  double weight1);
+
+/* Set a node's profile from its children.
+   Deletes the previous profile if it exists
+   Use -1.0 for a balanced join
+   Fails unless the node has two children (e.g., no leaves or root)
+*/
+void SetProfile(/*IN/OUT*/NJ_t *NJ, int node, double weight1);
 
 /* OutProfile does an unweighted combination of nodes to create the
    out-profile. It always sets code to NOCODE so that UpdateOutProfile
@@ -678,16 +752,21 @@ void FastNJSearch(NJ_t *NJ, int nActive, /*UPDATE*/besthit_t *visible, /*OUT*/be
 /* Before we do any joins -- sets tophits */
 void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits);
 
-/* Find the best join to do */
+/* Find the best join to do.  topvisible is a list of active nodes (or
+   -1) that stores the m known joins. If it shrinks
+   to m/2 active entries then TopHitNJSearch will recompute it.
+*/
 void TopHitNJSearch(/*IN/UPDATE*/NJ_t *NJ,
 		    int nActive,
 		    int m,
 		    /*IN/UPDATE*/besthit_t *visible,
+		    /*IN/OUT*/int *topvisible, /* a list */
+		    /*IN/OUT*/int *topVisibleAge, /* an integer */
 		    /*IN/UPDATE*/besthit_t **tophits,
 		    /*OUT*/besthit_t *bestjoin);
 
 /* Returns the index of the best hit within the tophits.
-   NJ may be modified because it updates out-distances if necessary
+   NJ may be modified because it updates out-distances if they are too stale
    tophits may be modified because it walks "up" from hits to joined nodes
    Does *not* update visible set
 */
@@ -702,7 +781,8 @@ int GetBestFromTopHits(int iNode, /*IN/UPDATE*/NJ_t *NJ, int nActive,
 void TopHitJoin(/*IN/UPDATE*/NJ_t *NJ, int newnode, int nActive, int m,
 		/*IN/OUT*/besthit_t **tophits,
 		/*IN/OUT*/int *tophitAge,
-		/*IN/OUT*/besthit_t *visible);
+		/*IN/OUT*/besthit_t *visible,
+		/*IN/OUT*/int *topvisible);
 
 /* Sort by criterion and save the best nOut hits as a new array,
    which is returned.
@@ -734,7 +814,22 @@ void TransferBestHits(/*IN/UPDATE*/NJ_t *NJ, int nActive,
 void ResetVisible(/*IN/UPDATE*/NJ_t *NJ, int nActive,
 		  /*IN*/besthit_t *tophitsNode,
 		  int nTopHits,
-		  /*IN/UPDATE*/besthit_t *visible);
+		  /*IN/UPDATE*/besthit_t *visible,
+		  /*IN/UPDATE*/int *topvisible);
+
+/* Update the top-visible list to perhaps include visible[iNode] */
+void UpdateTopVisible(/*IN*/NJ_t * NJ,
+		      /*IN*/besthit_t *visible,
+		      /*IN/UPDATE*/int *topvisible,
+		      int m, 	/* length of topvisible */
+		      int iNode);
+
+/* Recompute the topvisible list */
+void ResetTopVisible(/*IN*/NJ_t *NJ,
+		     int nActive,
+		     /*IN*/besthit_t *visible,
+		     /*OUT*/int *topvisible,
+		     int m);	/* length of topvisible */
 
 /* Make a shorter list with only unique entries.
    Ignores self-hits to iNode and "dead" hits to
@@ -744,7 +839,28 @@ besthit_t *UniqueBestHits(NJ_t *NJ, int iNode, besthit_t *combined, int nCombine
 
 nni_t ChooseNNI(profile_t *profiles[4],
 		/*OPTIONAL*/distance_matrix_t *dmat,
-		int nPos, int nConstraints);
+		int nPos, int nConstraints,
+		/*OUT*/double criteria[3]);  /* The three potential internal branch lengths */
+
+/* Returns the number of steps considered, with the actual steps in steps[]
+   Modifies the tree by this chain of NNIs
+*/
+int FindSPRSteps(/*IN/OUT*/NJ_t *NJ, 
+		 int node,
+		 int parent,	/* sibling or parent of node to NNI to start the chain */
+		 /*IN/OUT*/profile_t **upProfiles,
+		 /*OUT*/spr_step_t *steps,
+		 int maxSteps,
+		 bool bFirstAC);
+
+/* Undo a single NNI */
+void UnwindSPRStep(/*IN/OUT*/NJ_t *NJ,
+	       /*IN*/spr_step_t *step,
+	       /*IN/OUT*/profile_t **upProfiles);
+
+
+/* Update the profile of node and its ancestor, and delete nearby out-profiles */
+void UpdateForNNI(/*IN/OUT*/NJ_t *NJ, int node, /*IN/OUT*/profile_t **upProfiles);
 
 /* Sets NJ->parent[newchild] and replaces oldchild with newchild
    in the list of children of parent
@@ -767,6 +883,10 @@ void SetupABCD(NJ_t *NJ, int node,
 
 int Sibling(NJ_t *NJ, int node); /* At root, no unique sibling so returns -1 */
 void RootSiblings(NJ_t *NJ, int node, /*OUT*/int sibs[2]);
+
+/* Print a progress report if more than 0.1 second has gone by since the progress report */
+/* Format should include 0-4 %d references and no newlines */
+void ProgressReport(char *format, int iArg1, int iArg2, int iArg3, int iArg4);
 
 void *mymalloc(size_t sz);       /* Prints "Out of memory" and exits on failure */
 void *myfree(void *, size_t sz); /* Always returns NULL */
@@ -805,6 +925,7 @@ int HashCount(hashstrings_t *hash, hashiterator_t hi);
 int HashFirst(hashstrings_t *hash, hashiterator_t hi);
 
 void PrintNJ(/*WRITE*/FILE *, NJ_t *NJ, char **names, uniquify_t *unique);
+void PrintNJInternal(/*WRITE*/FILE *, NJ_t *NJ); /* Print topology using node indices as node names */
 
 uniquify_t *UniquifyAln(/*IN*/alignment_t *aln);
 uniquify_t *FreeUniquify(uniquify_t *);	/* returns NULL */
@@ -830,7 +951,9 @@ void ReadTreeMaybeAddLeaf(int parent, char *name,
 			  /*IN/OUT*/int *parents, /*IN/OUT*/children_t *children);
 void ReadTreeRemove(/*IN/OUT*/int *parents, /*IN/OUT*/children_t *children, int node);
 
-/* Routines to support tree traversal */
+/* Routines to support tree traversal and prevent visiting a node >1 time
+   (esp. if topology changes).
+*/
 typedef bool *traversal_t;
 traversal_t InitTraversal(NJ_t*);
 traversal_t FreeTraversal(traversal_t, NJ_t*); /*returns NULL*/
@@ -879,7 +1002,13 @@ int main(int argc, char **argv) {
   char *intreeFile = NULL;
   bool intree1 = false;		/* the same starting tree each round */
   int nni = -1;			/* number of rounds of NNI, defaults to log2(n)+1 */
+  int spr = 2;			/* number of rounds of SPR */
+  int maxSPRLength = 10;	/* maximum distance to move a node */
 
+  if (isatty(STDIN_FILENO) && argc == 1) {
+      fprintf(stderr,"%s",usage);
+      exit(0);
+  }    
   for (iArg = 1; iArg < argc; iArg++) {
     if (strcmp(argv[iArg],"-makematrix") == 0) {
       make_matrix = true;
@@ -923,6 +1052,8 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[iArg], "-boot") == 0 && iArg < argc-1) {
       iArg++;
       nBootstrap = atoi(argv[iArg]);
+    } else if (strcmp(argv[iArg], "-noboot") == 0) {
+      nBootstrap = 0;
     } else if (strcmp(argv[iArg], "-seed") == 0 && iArg < argc-1) {
       iArg++;
       long seed = atol(argv[iArg]);
@@ -960,8 +1091,19 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[iArg],"-nni") == 0 && iArg < argc-1) {
       iArg++;
       nni = atoi(argv[iArg]);
+      if (nni == 0)
+	spr = 0;
+    } else if (strcmp(argv[iArg],"-spr") == 0 && iArg < argc-1) {
+      iArg++;
+      spr = atoi(argv[iArg]);
+    } else if (strcmp(argv[iArg],"-sprlength") == 0 && iArg < argc-1) {
+      iArg++;
+      maxSPRLength = atoi(argv[iArg]);
     } else if (strcmp(argv[iArg],"-help") == 0) {
       fprintf(stderr,"%s",usage);
+      exit(0);
+    } else if (strcmp(argv[iArg],"-expert") == 0) {
+      fprintf(stderr, "%s", expertUsage);
       exit(0);
     } else if (strcmp(argv[iArg],"-pseudo") == 0) {
       if (iArg < argc-1 && isdigit(argv[iArg+1][0])) {
@@ -1011,8 +1153,10 @@ int main(int argc, char **argv) {
 
   if (verbose && !make_matrix) {		/* Report settings */
     char tophitString[100] = "no";
-    if(tophitsMult>0) sprintf(tophitString,"%.2f*sqrtN close=%.2f refresh=%.2f",
-			      tophitsMult, tophitsClose, tophitsRefresh);
+    char tophitsCloseStr[100] = "default";
+    if(tophitsClose > 0) sprintf(tophitsCloseStr,"%.2f",tophitsClose);
+    if(tophitsMult>0) sprintf(tophitString,"%.2f*sqrtN close=%s refresh=%.2f",
+			      tophitsMult, tophitsCloseStr, tophitsRefresh);
     char supportString[100] = "none";
     if (nBootstrap>0) sprintf(supportString,"Local boot %d",nBootstrap);
     char nniString[100] = "(no NNI)";
@@ -1020,23 +1164,26 @@ int main(int argc, char **argv) {
       sprintf(nniString, "+NNI (%d rounds)", nni);
     if (nni == -1)
       strcpy(nniString, "+NNI");
+    char sprString[100] = "(no SPR)";
+    if (spr > 0)
+      sprintf(sprString, "+SPR (%d rounds, max-distance %d)", spr, maxSPRLength);
 
     fprintf(stderr,"Alignment: %s", fileName != NULL ? fileName : "standard input");
     if (nAlign>1)
       fprintf(stderr, " (%d alignments)", nAlign);
-    fprintf(stderr,"\n%s distances: %s Method: %s Support: %s\n",
+    fprintf(stderr,"\n%s distances: %s Joins: %s Support: %s\n",
 	    nCodes == 20 ? "Amino acid" : "Nucleotide",
-	    matrixPrefix ? matrixPrefix : (useMatrix? "BLOSUM45 (default)"
+	    matrixPrefix ? matrixPrefix : (useMatrix? "BLOSUM45"
 					   : (nCodes==4 && logdist ? "Jukes-Cantor" : "%different")),
-	    bionj ? "BIONJ" : "neighbor-joining" ,
+	    bionj ? "weighted" : "balanced" ,
 	    supportString);
     if (intreeFile == NULL)
-      fprintf(stderr, "Search: %s %s TopHits: %s\n",
+      fprintf(stderr, "Search: %s %s %s\nTopHits: %s\n",
 	      slow?"Exhaustive (slow)" : (fastest ? "Fastest" : "Normal (fast/relax)"),
-	      nniString,
+	      nniString, sprString,
 	      tophitString);
     else
-      fprintf(stderr, "Start at tree from %s %s\n", intreeFile, nniString);
+      fprintf(stderr, "Start at tree from %s %s %s\n", intreeFile, nniString, sprString);
 
     if (constraintsFile != NULL)
       fprintf(stderr, "Constraints: %s Weight: %.3f\n", constraintsFile, constraintWeight);
@@ -1089,6 +1236,9 @@ int main(int argc, char **argv) {
       exit(1);
     }
 
+    clock_t clock_start = clock();
+    ProgressReport("Read alignment",0,0,0,0);
+
     /* Check that all names in alignment are unique */
     hashstrings_t *hashnames = MakeHashtable(aln->names, aln->nSeq);
     int i;
@@ -1101,8 +1251,7 @@ int main(int argc, char **argv) {
     }
 
     /* Make a list of unique sequences -- note some lists are bigger than required */
-
-    clock_t clock_start = clock();
+    ProgressReport("Hashed the names",0,0,0,0);
     if (make_matrix) {
       NJ_t *NJ = InitNJ(aln->seqs, aln->nSeq, aln->nPos,
 			/*constraintSeqs*/NULL, /*nConstraints*/0,
@@ -1125,6 +1274,7 @@ int main(int argc, char **argv) {
       profileOps = 0;
       outprofileOps = 0;
       seqOps = 0;
+      profileAvgOps = 0;
       nBetter = 0;
       nCloseUsed = 0;
       nRefreshTopHits = 0;
@@ -1137,6 +1287,7 @@ int main(int argc, char **argv) {
       maxmallocHeap = 0;
 
       uniquify_t *unique = UniquifyAln(aln);
+      ProgressReport("Identified unique sequences",0,0,0,0);
 
       /* read constraints */
       alignment_t *constraints = NULL;
@@ -1149,6 +1300,7 @@ int main(int argc, char **argv) {
 	  constraints = FreeAlignment(constraints);
 	} else {
 	  uniqConstraints = AlnToConstraints(constraints, unique, hashnames);
+	  ProgressReport("Read the constraints",0,0,0,0);
 	}
       }	/* end load constraints */
 
@@ -1180,23 +1332,37 @@ int main(int argc, char **argv) {
       long svProfileFreqAlloc = nProfileFreqAlloc;
       long svProfileFreqAvoid = nProfileFreqAvoid;
 #endif
-      int nniToDo = nni == -1 ? 1 + (int)(0.5 + log(NJ->nSeq)/log(2)) : nni;
+      int nniToDo = nni == -1 ? 1 + (int)(0.5 + 2.0 * log(NJ->nSeq)/log(2)) : nni;
+      int sprRemaining = spr;
+      if(verbose>0) {
+	if (isatty(STDERR_FILENO)) fprintf(stderr,"\n");
+	if (fpInTree == NULL)
+	    fprintf(stderr, "Initial topology in %.2f seconds\n", (clock()-clock_start)/(double)CLOCKS_PER_SEC);
+	if (spr > 0 || nniToDo > 0)
+	  fprintf(stderr,"Refining topology: %d rounds NNIs, %d rounds SPRs\n", nniToDo, spr);
+	}
+
       if (nniToDo>0) {
 	int i;
-	if(verbose>0) {
-	  if (fpInTree == NULL)
-	    fprintf(stderr, "Initial topology in %.2f seconds\n", (clock()-clock_start)/(double)CLOCKS_PER_SEC);
-	  fprintf(stderr,"Doing %d rounds of nearest-neighbor interchanges\n", nniToDo);
-	}
 	for (i=0; i < nniToDo; i++) {
 	  if(verbose>1) {
 	    fprintf(stderr, "Topology before NNI round %d\n",i);
 	    fflush(stderr);
 	    PrintNJ(stderr, NJ, aln->names, unique);
 	  }
-	  NNI(/*IN/OUT*/NJ);
+	  NNI(/*IN/OUT*/NJ, i, nniToDo);
+	  /* Interleave SPRs with NNIs (typically 1/3rd NNI, SPR, 1/3rd NNI, SPR, 1/3rd NNI */
+	  if (sprRemaining > 0 && nniToDo/(spr+1) > 0 && ((i+1) % (nniToDo/(spr+1))) == 0) {
+	    SPR(/*IN/OUT*/NJ, maxSPRLength, spr-sprRemaining, spr);
+	    sprRemaining--;
+	  }
 	}
       }
+      while(sprRemaining > 0) {	/* do any remaining SPR rounds */
+	SPR(/*IN/OUT*/NJ, maxSPRLength, spr-sprRemaining, spr);
+	sprRemaining--;
+      }
+
       /* Always update branch lengths (even if nni=0) so that they are log-corrected,
 	 do not include penalties from constraints,
 	 and avoid errors due to approximation of out-distances.
@@ -1210,6 +1376,7 @@ int main(int argc, char **argv) {
 	  int iNode;
 	  for (iNode = 0; iNode < NJ->maxnode; iNode++)
 	    total_len += fabs(NJ->branchlength[iNode]);
+	  if (isatty(STDERR_FILENO)) fprintf(stderr,"\n");
 	  fprintf(stderr, "Total branch-length %.3f after %.2f sec -- computing support values\n",
 		  total_len,
 		  (clock()-clock_start)/(double)CLOCKS_PER_SEC);
@@ -1218,9 +1385,11 @@ int main(int argc, char **argv) {
 	ReliabilityNJ(NJ);
       }
       if(verbose) {
+	if (isatty(STDERR_FILENO)) fprintf(stderr,"\n");
 	fprintf(stderr, "Unique: %d/%d", NJ->nSeq, aln->nSeq);
-	if(!slow) fprintf(stderr, " Hill-climb: %ld Update-best: %ld NNI: %ld",
-			  nBetter, nVisibleReset, nNNI);
+	if(!slow) fprintf(stderr, " Hill-climb: %ld Update-best: %ld", nBetter, nVisibleReset);
+	if (nniToDo > 0 || spr > 0)
+	  fprintf(stderr, " NNI: %ld SPR: %ld", nNNI, nSPR);
 	fprintf(stderr,"\n");
 	if (nCloseUsed>0 || nRefreshTopHits>0)
 	  fprintf(stderr, "Top hits: close neighbors %ld/%d refreshes %ld\n",
@@ -1238,9 +1407,9 @@ int main(int argc, char **argv) {
 	  }
 	}
 	double dN2 = NJ->nSeq*(double)NJ->nSeq;
-	fprintf(stderr, "Time %.2f Distances per N*N: by-profile %.3f (out %.3f) by-leaf %.3f\n",
+	fprintf(stderr, "Time %.2f Dist/N**2: by-profile %.3f (out %.3f) by-leaf %.3f Avg %.3f\n",
 		(clock()-clock_start)/(double)CLOCKS_PER_SEC,
-		profileOps/dN2, outprofileOps/dN2, seqOps/dN2);
+		profileOps/dN2, outprofileOps/dN2, seqOps/dN2, profileAvgOps/dN2);
 #ifdef TRACK_MEMORY
 	fprintf(stderr, "Memory: %.2f MB (%.1f byte/pos) ",
 		maxmallocHeap/1.0e6, maxmallocHeap/(double)(aln->nSeq*(double)aln->nPos));
@@ -1267,6 +1436,32 @@ int main(int argc, char **argv) {
   exit(0);
 }
 
+void ProgressReport(char *format, int i1, int i2, int i3, int i4) {
+  static bool clock_set = false;
+  static clock_t clock_last;
+  static clock_t clock_begin;
+
+  if (!verbose)
+    return;
+
+  clock_t clock_now = clock();
+  if (!clock_set) {
+    clock_begin = clock_last = clock_now;
+    clock_set = true;
+  }
+  if ((clock_now-clock_last)/(double)CLOCKS_PER_SEC > 0.1 || verbose > 1) {
+    fprintf(stderr, "%9.2f seconds: ", (clock_now-clock_begin)/(double)CLOCKS_PER_SEC);
+    fprintf(stderr, format, i1, i2, i3, i4);
+    if (verbose > 1 || !isatty(STDERR_FILENO)) {
+      fprintf(stderr, "\n");
+    } else {
+      fprintf(stderr, "   \r");
+    }
+    fflush(stderr);
+    clock_last = clock_now;
+  }
+}
+
 NJ_t *InitNJ(char **sequences, int nSeq, int nPos,
 	     /*OPTIONAL*/char **constraintSeqs, int nConstraints,
 	     /*OPTIONAL*/distance_matrix_t *distance_matrix) {
@@ -1284,12 +1479,49 @@ NJ_t *InitNJ(char **sequences, int nSeq, int nPos,
 
   NJ->profiles = (profile_t **)mymalloc(sizeof(profile_t*) * NJ->maxnodes);
 
+  unsigned long counts[256];
+  int i;
+  for (i = 0; i < 256; i++)
+    counts[i] = 0;
   for (iNode = 0; iNode < NJ->nSeq; iNode++) {
     NJ->profiles[iNode] = SeqToProfile(NJ, NJ->seqs[iNode], nPos,
 				       constraintSeqs != NULL ? constraintSeqs[iNode] : NULL,
 				       nConstraints,
-				       iNode);
+				       iNode,
+				       /*IN/OUT*/counts);
   }
+  unsigned long totCount = 0;
+  for (i = 0; i < 256; i++)
+    totCount += counts[i];
+
+  /* warnings about unknown characters */
+  for (i = 0; i < 256; i++) {
+    if (counts[i] == 0 || i == '.' || i == '-')
+      continue;
+    unsigned char *codesP;
+    bool bMatched = false;
+    for (codesP = codesString; *codesP != '\0'; codesP++) {
+      if (*codesP == i || tolower(*codesP) == i) {
+	bMatched = true;
+	break;
+      }
+    }
+    if (!bMatched)
+      fprintf(stderr, "Ignored unknown character %c (seen %lu times)\n", i, counts[i]);
+  }
+    
+
+  /* warnings about the counts */
+  double fACGTUN = (counts['A'] + counts['C'] + counts['G'] + counts['T'] + counts['U'] + counts['N']
+		    + counts['a'] + counts['c'] + counts['g'] + counts['t'] + counts['u'] + counts['n'])
+    / (double)(totCount - counts['-'] - counts['.']);
+  if (nCodes == 4 && fACGTUN < 0.9)
+    fprintf(stderr, "WARNING! ONLY %.1f%% NUCLEOTIDE CHARACTERS -- IS THIS REALLY A NUCLEOTIDE ALIGNMENT?\n",
+	    100.0 * fACGTUN);
+  else if (nCodes == 20 && fACGTUN >= 0.9)
+    fprintf(stderr, "WARNING! %.1f%% NUCLEOTIDE CHARACTERS -- IS THIS REALLY A PROTEIN ALIGNMENT?\n",
+	    100.0 * fACGTUN);
+
   if(verbose>10) fprintf(stderr,"Made sequence profiles\n");
   for (iNode = NJ->nSeq; iNode < NJ->maxnodes; iNode++) 
     NJ->profiles[iNode] = NULL; /* not yet exists */
@@ -1317,7 +1549,7 @@ NJ_t *InitNJ(char **sequences, int nSeq, int nPos,
   NJ->outDistances = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
   NJ->nOutDistActive = (int *)mymalloc(sizeof(int)*NJ->maxnodes);
   for (iNode = 0; iNode < NJ->maxnodes; iNode++)
-    NJ->nOutDistActive[iNode] = NJ->nSeq * 2; /* unreasonably high value */
+    NJ->nOutDistActive[iNode] = NJ->nSeq * 10; /* unreasonably high value */
   NJ->parent = NULL;		/* so SetOutDistance ignores it */
   for (iNode = 0; iNode < NJ->nSeq; iNode++)
     SetOutDistance(/*IN/UPDATE*/NJ, iNode, /*nActive*/NJ->nSeq);
@@ -1392,6 +1624,7 @@ void FastNJ(NJ_t *NJ) {
   /* The visible set stores the best hit of each node */
   besthit_t *visible = NULL;
   besthit_t *besthitNew = NULL;	/* All hits of new node -- not used if doing top-hits */
+  int *topvisible = NULL;	/* The top m candidates in the visible set */
 
   /* The top-hits lists, with the key parameter m = length of each top-hit list */
   besthit_t **tophits = NULL;	/* Up to top m hits for each node; i and j are -1 if past end of list */
@@ -1424,6 +1657,10 @@ void FastNJ(NJ_t *NJ) {
 		mi.uordblks/1.0e6);
       }
 #endif
+      topvisible = (int*)mymalloc(sizeof(int)*m);
+      int i;
+      for (i = 0; i < m; i++)
+	topvisible[i] = -1;
   }
 
   /* Initialize visible set */
@@ -1439,27 +1676,36 @@ void FastNJ(NJ_t *NJ) {
   }
 
   /* Iterate over joins */
+  int nActiveOutProfileReset = NJ->nSeq;
   int nActive;
+  int topVisibleAge = 0;
   for (nActive = NJ->nSeq; nActive > 3; nActive--) {
+    int nJoinsDone = NJ->nSeq - nActive;
+    if (nJoinsDone > 0 && (nJoinsDone % 100) == 0)
+      ProgressReport("Joined %6d of %6d", nJoinsDone, NJ->nSeq-3, 0, 0);
+    
     besthit_t join; 		/* the join to do */
     if (slow) {
       ExhaustiveNJSearch(NJ,nActive,/*OUT*/&join);
     } else if (m>0) {
-      TopHitNJSearch(/*IN/OUT*/NJ, nActive, m, /*IN/OUT*/visible, /*IN/OUT*/tophits, /*OUT*/&join);
+      TopHitNJSearch(/*IN/OUT*/NJ, nActive, m,
+		     /*IN/OUT*/visible, /*IN/OUT*/topvisible, /*IN/OUT*/&topVisibleAge,
+		     /*IN/OUT*/tophits, /*OUT*/&join);
     } else {
       FastNJSearch(NJ, nActive, /*IN/OUT*/visible, /*OUT*/&join);
     }
 
     if (verbose>2) {
-      double penalty = JoinConstraintPenalty(NJ, nActive, join.i, join.j);
+      double penalty = constraintWeight
+	* (double)JoinConstraintPenalty(NJ, join.i, join.j);
       if (penalty > 0.001) {
 	fprintf(stderr, "Constraint violation during neighbor-joining %d %d into %d penalty %.3f\n",
 		join.i, join.j, NJ->maxnode, penalty);
 	int iC;
 	for (iC = 0; iC < NJ->nConstraints; iC++) {
-	  double piece = JoinConstraintPenaltyPiece(NJ, nActive, join.i, join.j, iC);
-	  if (piece > 0.001)
-	    fprintf(stderr, "Constraint %d piece %.3f %d/%d %d/%d %d/%d\n", iC, piece,
+	  int local = JoinConstraintPenaltyPiece(NJ, join.i, join.j, iC);
+	  if (local > 0)
+	    fprintf(stderr, "Constraint %d piece %d %d/%d %d/%d %d/%d\n", iC, local,
 		    NJ->profiles[join.i]->nOn[iC],
 		    NJ->profiles[join.i]->nOff[iC],
 		    NJ->profiles[join.j]->nOn[iC],
@@ -1578,7 +1824,9 @@ void FastNJ(NJ_t *NJ) {
 					   bionj ? bionjWeight : /*noweight*/-1.0);
 
     /* Update out-distances and total diameters */
-    if (((NJ->nSeq - nActive + 1) % nRecomputeOutProfile) == 0) {
+    int changedActiveOutProfile = nActiveOutProfileReset - (nActive-1);
+    if (changedActiveOutProfile >= nResetOutProfile
+	&& changedActiveOutProfile >= fResetOutProfile * nActiveOutProfileReset) {
       /* Recompute the outprofile from scratch to avoid roundoff error */
       profile_t **activeProfiles = (profile_t**)mymalloc(sizeof(profile_t*)*(nActive-1));
       int nSaved = 0;
@@ -1592,11 +1840,12 @@ void FastNJ(NJ_t *NJ) {
       }
       assert(nSaved==nActive-1);
       FreeProfile(NJ->outprofile, NJ->nPos, NJ->nConstraints);
-      if(verbose>1) fprintf(stderr,"Recomputing outprofile\n");
+      if(verbose>1) fprintf(stderr,"Recomputing outprofile %d %d\n",nActiveOutProfileReset,nActive-1);
       NJ->outprofile = OutProfile(activeProfiles, nSaved,
 				  NJ->nPos, NJ->nConstraints,
 				  NJ->distance_matrix);
       activeProfiles = myfree(activeProfiles, sizeof(profile_t*)*(nActive-1));
+      nActiveOutProfileReset = nActive-1;
     } else {
       UpdateOutProfile(/*OUT*/NJ->outprofile,
 		       NJ->profiles[join.i], NJ->profiles[join.j], NJ->profiles[newnode],
@@ -1616,7 +1865,7 @@ void FastNJ(NJ_t *NJ) {
     if (m>0) {
       TopHitJoin(/*IN/OUT*/NJ, newnode, nActive-1, m,
 		 /*IN/OUT*/tophits, /*IN/OUT*/tophitAge,
-		 /*IN/OUT*/visible);
+		 /*IN/OUT*/visible, /*IN/OUT*/topvisible);
     } else {
       /* Not using top-hits, so we update all out-distances */
       for (iNode = 0; iNode < NJ->maxnode; iNode++) {
@@ -1681,6 +1930,7 @@ void FastNJ(NJ_t *NJ) {
     tophits = myfree(tophits, sizeof(besthit_t*)*NJ->maxnodes);
     tophitAge = myfree(tophitAge,sizeof(int)*NJ->maxnodes);
   }
+  topvisible = myfree(topvisible, sizeof(int)*m);
 
   /* Add a root for the 3 remaining nodes */
   int top[3];
@@ -2162,21 +2412,55 @@ void ReadTree(/*IN/OUT*/NJ_t *NJ,
   traversal_t traversal = InitTraversal(NJ);
   node = NJ->root;
   while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
-    if (node < NJ->nSeq || node == NJ->root)
-      continue; 		/* nothing to do for leaves or root */
-    children_t *c = &NJ->child[node];
-    assert(c->nChild == 2);
-    assert(NJ->profiles[c->child[0]] != NULL);
-    assert(NJ->profiles[c->child[1]] != NULL);
-    NJ->profiles[node] = AverageProfile(NJ->profiles[c->child[0]],
-					NJ->profiles[c->child[1]],
-					NJ->nPos, NJ->nConstraints,
-					NJ->distance_matrix,
-					/*noweight*/-1.0);
+    if (node >= NJ->nSeq && node != NJ->root)
+      SetProfile(/*IN/OUT*/NJ, node, /*noweight*/-1.0);
   }
   traversal = FreeTraversal(traversal,NJ);
 }
-  
+
+/* Print topology using node indices as node names */
+void PrintNJInternal(FILE *fp, NJ_t *NJ) {
+  if (NJ->nSeq < 4) {
+    return;
+  }
+  typedef struct { int node; int end; } stack_t;
+  stack_t *stack = (stack_t *)mymalloc(sizeof(stack_t)*NJ->maxnodes);
+  int stackSize = 1;
+  stack[0].node = NJ->root;
+  stack[0].end = 0;
+
+  while(stackSize>0) {
+    stack_t *last = &stack[stackSize-1];
+    stackSize--;
+    /* Save last, as we are about to overwrite it */
+    int node = last->node;
+    int end = last->end;
+
+    if (node < NJ->nSeq) {
+      if (NJ->child[NJ->parent[node]].child[0] != node) fputs(",",fp);
+      fprintf(fp, "%d", node);
+    } else if (end) {
+      fprintf(fp, ")%d", node);
+    } else {
+            if (node != NJ->root && NJ->child[NJ->parent[node]].child[0] != node) fprintf(fp, ",");
+      fprintf(fp, "(");
+      stackSize++;
+      stack[stackSize-1].node = node;
+      stack[stackSize-1].end = 1;
+      children_t *c = &NJ->child[node];
+      // put children on in reverse order because we use the last one first
+      int i;
+      for (i = c->nChild-1; i >=0; i--) {
+	stackSize++;
+	stack[stackSize-1].node = c->child[i];
+	stack[stackSize-1].end = 0;
+      }
+    }
+  }
+  fprintf(fp, ";\n");
+  stack = myfree(stack, sizeof(stack_t)*NJ->maxnodes);
+}
+
 void PrintNJ(FILE *fp, NJ_t *NJ, char **names, uniquify_t *unique) {
   /* And print the tree: depth first search
    * The stack contains
@@ -2527,7 +2811,8 @@ char **AlnToConstraints(alignment_t *constraints, uniquify_t *unique, hashstring
 profile_t *SeqToProfile(/*IN/OUT*/NJ_t *NJ,
 			char *seq, int nPos,
 			/*OPTIONAL*/char *constraintSeq, int nConstraints,
-			int iNode) {
+			int iNode,
+			unsigned long counts[256]) {
   static unsigned char charToCode[256];
   static int codeSet = 0;
   int c, i;
@@ -2547,19 +2832,12 @@ profile_t *SeqToProfile(/*IN/OUT*/NJ_t *NJ,
   assert(strlen(seq) == nPos);
   profile_t *profile = NewProfile(nPos,nConstraints);
 
-  bool bWarn = false;
-
   for (i = 0; i < nPos; i++) {
-    c = charToCode[(unsigned int)seq[i]];
+    unsigned int character = (unsigned int) seq[i];
+    counts[character]++;
+    c = charToCode[character];
     if(verbose>10 && i < 2) fprintf(stderr,"pos %d char %c code %d\n", i, seq[i], c);
-    /* treat unknowns as gaps, but warn if verbose and unknown isn't X */
-    if (c == nCodes && verbose && seq[i] != 'X') {
-      if (!bWarn) {
-	fprintf(stderr, "Characters in unique sequence %d replaced with gap:", iNode+1);
-	bWarn = true;
-      }
-      fprintf(stderr, " %c%d", seq[i], i+1);
-    }
+    /* treat unknowns as gaps */
     if (c == nCodes || c == NOCODE) {
       profile->codes[i] = NOCODE;
       profile->weights[i] = 0.0;
@@ -2568,16 +2846,14 @@ profile_t *SeqToProfile(/*IN/OUT*/NJ_t *NJ,
       profile->weights[i] = 1.0;
     }
   }
-  if (bWarn)
-    fprintf(stderr, "\n");
   if (nConstraints > 0) {
     for (i = 0; i < nConstraints; i++) {
       profile->nOn[i] = 0;
       profile->nOff[i] = 0;
     }
+    bool bWarn = false;
     if (constraintSeq != NULL) {
       assert(strlen(constraintSeq) == nConstraints);
-      bWarn = false;
       for (i = 0; i < nConstraints; i++) {
 	if (constraintSeq[i] == '1') {
 	  profile->nOn[i] = 1;
@@ -2669,17 +2945,17 @@ void CorrectedPairDistances(profile_t **profiles, int nProfiles,
    node1, node2, and other are all represented in the constraint
    and if one of the 3 is split and the other two do not agree
  */
-double JoinConstraintPenalty(/*IN*/NJ_t *NJ, int nActive, int node1, int node2) {
+int JoinConstraintPenalty(/*IN*/NJ_t *NJ, int node1, int node2) {
   if (NJ->nConstraints == 0)
     return(0.0);
-  double penalty = 0;
+  int penalty = 0;
   int iC;
   for (iC = 0; iC < NJ->nConstraints; iC++)
-    penalty += JoinConstraintPenaltyPiece(NJ, nActive, node1, node2, iC);
+    penalty += JoinConstraintPenaltyPiece(NJ, node1, node2, iC);
   return(penalty);
 }
 
-double JoinConstraintPenaltyPiece(NJ_t *NJ, int nActive, int node1, int node2, int iC) {
+int JoinConstraintPenaltyPiece(NJ_t *NJ, int node1, int node2, int iC) {
   profile_t *pOut = NJ->outprofile;
   profile_t *p1 = NJ->profiles[node1];
   profile_t *p2 = NJ->profiles[node2];
@@ -2698,10 +2974,10 @@ double JoinConstraintPenaltyPiece(NJ_t *NJ, int nActive, int node1, int node2, i
     int nSplit = (code1 == -1 ? 1 : 0) + (code2 == -1 ? 1 : 0) + (code3 == -1 ? 1 : 0);
     int nOn = (code1 == 1 ? 1 : 0) + (code2 == 1 ? 1 : 0) + (code3 == 1 ? 1 : 0);
     if (nSplit == 1 && nOn == 1)
-      return(constraintWeight * PairConstraintDistance(nOn1,nOff1,nOn2,nOff2));
+      return(SplitConstraintPenalty(nOn1+nOn2, nOff1+nOff2, nOnOut, nOffOut));
   }
   /* else */
-  return(0.0);
+  return(0);
 }
 
 void QuartetConstraintPenalties(profile_t *profiles[4], int nConstraints, /*OUT*/double penalty[3]) {
@@ -2712,12 +2988,8 @@ void QuartetConstraintPenalties(profile_t *profiles[4], int nConstraints, /*OUT*
     return;
   int iC;
   for (iC = 0; iC < nConstraints; iC++) {
-    double piece[6];
-    if (QuartetConstraintPenaltiesPiece(profiles, iC, /*OUT*/piece)) {
-      double part[3];
-      part[ABvsCD] = piece[qAB] + piece[qCD];
-      part[ACvsBD] = piece[qAC] + piece[qBD];
-      part[ADvsBC] = piece[qAD] + piece[qBC];
+    double part[3];
+    if (QuartetConstraintPenaltiesPiece(profiles, iC, /*OUT*/part)) {
       for (i=0;i<3;i++)
 	penalty[i] += part[i];
 
@@ -2736,30 +3008,57 @@ void QuartetConstraintPenalties(profile_t *profiles[4], int nConstraints, /*OUT*
 	    penalty[ABvsCD], penalty[ACvsBD], penalty[ADvsBC]);
 }
 
-bool QuartetConstraintPenaltiesPiece(profile_t *profiles[4], int iC, /*OUT*/double piece[6]) {
-  int nOn[4];
-  int nOff[4];
-  int iHit,i,j;
-  
-  for (i=0; i < 4; i++) {
-    nOn[i] = profiles[i]->nOn[iC];
-    nOff[i] = profiles[i]->nOff[iC];
-    if (nOn[i] + nOff[i] == 0)
-      return(false);
-  }
-  for (iHit=0, i=0; i < 4; i++) {
-    for (j=i+1; j < 4; j++, iHit++) {
-      piece[iHit] = constraintWeight * PairConstraintDistance(nOn[i], nOff[i], nOn[j], nOff[j]);
-    }
-  }
-  return(true);
-}
-
 double PairConstraintDistance(int nOn1, int nOff1, int nOn2, int nOff2) {
   double f1 = nOn1/(double)(nOn1+nOff1);
   double f2 = nOn2/(double)(nOn2+nOff2);
   /* 1 - f1 * f2 - (1-f1)*(1-f2) = 1 - f1 * f2 - 1 + f1 + f2 - f1 * f2 */
   return(f1 + f2 - 2.0 * f1 * f2);
+}
+
+bool QuartetConstraintPenaltiesPiece(profile_t *profiles[4], int iC, /*OUT*/double piece[3]) {
+  int nOn[4];
+  int nOff[4];
+  int i;
+  int nSplit = 0;
+  int nPlus = 0;
+  int nMinus = 0;
+  
+  for (i=0; i < 4; i++) {
+    nOn[i] = profiles[i]->nOn[iC];
+    nOff[i] = profiles[i]->nOff[iC];
+    if (nOn[i] + nOff[i] == 0)
+      return(false);		/* ignore */
+    else if (nOn[i] > 0 && nOff[i] > 0)
+      nSplit++;
+    else if (nOn[i] > 0)
+      nPlus++;
+    else
+      nMinus++;
+  }
+  /* If just one of them is split or on the other side and the others all agree, also ignore */
+  if (nPlus >= 3 || nMinus >= 3)
+    return(false);
+  piece[ABvsCD] = constraintWeight
+    * (PairConstraintDistance(nOn[0],nOff[0],nOn[1],nOff[1])
+       + PairConstraintDistance(nOn[2],nOff[2],nOn[3],nOff[3]));
+  piece[ACvsBD] = constraintWeight
+    * (PairConstraintDistance(nOn[0],nOff[0],nOn[2],nOff[2])
+       + PairConstraintDistance(nOn[1],nOff[1],nOn[3],nOff[3]));
+  piece[ADvsBC] = constraintWeight
+    * (PairConstraintDistance(nOn[0],nOff[0],nOn[3],nOff[3])
+       + PairConstraintDistance(nOn[2],nOff[2],nOn[1],nOff[1]));
+  return(true);
+}
+
+/* Minimum number of constrained leaves that need to be moved
+   to satisfy the constraint (or 0 if constraint is satisfied)
+   Defining it this way should ensure that SPR moves that break
+   constraints get a penalty
+*/
+int SplitConstraintPenalty(int nOn1, int nOff1, int nOn2, int nOff2) {
+  return(nOn1 + nOff2 < nOn2 + nOff1 ?
+	 (nOn1 < nOff2 ? nOn1 : nOff2)
+	 : (nOn2 < nOff1 ? nOn2 : nOff1));
 }
 
 bool SplitViolatesConstraint(profile_t *profiles[4], int iConstraint) {
@@ -2861,7 +3160,7 @@ double ProfileDistPiece(unsigned int code1, unsigned int code2,
    returns NULL if we didn't store a vector
 */
 #define GET_FREQ(P,I,IVECTOR) \
-(P->weights[I] > 0 && P->codes[I] == NOCODE ? &P->vectors[nCodes*(IVECTOR++)] : NULL);
+(P->weights[I] > 0 && P->codes[I] == NOCODE ? &P->vectors[nCodes*(IVECTOR++)] : NULL)
 
 void ProfileDist(profile_t *profile1, profile_t *profile2, int nPos,
 		 /*OPTIONAL*/distance_matrix_t *dmat,
@@ -2872,11 +3171,10 @@ void ProfileDist(profile_t *profile1, profile_t *profile2, int nPos,
   int iFreq2 = 0;
   int i = 0;
   for (i = 0; i < nPos; i++) {
-      double weight = profile1->weights[i] * profile2->weights[i];
-
       float *f1 = GET_FREQ(profile1,i,/*IN/OUT*/iFreq1);
       float *f2 = GET_FREQ(profile2,i,/*IN/OUT*/iFreq2);
       if (profile1->weights[i] > 0 && profile2->weights[i] > 0) {
+	double weight = profile1->weights[i] * profile2->weights[i];
 	denom += weight;
 	double piece = ProfileDistPiece(profile1->codes[i],profile2->codes[i],f1,f2,dmat,
 					profile2->codeDist ? &profile2->codeDist[i*nCodes] : NULL);
@@ -2911,6 +3209,20 @@ void AddToFreq(/*IN/OUT*/float *fOut,
     assert(codeIn != NOCODE);
     fOut[codeIn] += weight;
   }
+}
+
+void SetProfile(/*IN/OUT*/NJ_t *NJ, int node, double weight1) {
+    children_t *c = &NJ->child[node];
+    assert(c->nChild == 2);
+    assert(NJ->profiles[c->child[0]] != NULL);
+    assert(NJ->profiles[c->child[1]] != NULL);
+    if (NJ->profiles[node] != NULL)
+      FreeProfile(NJ->profiles[node], NJ->nPos, NJ->nConstraints);
+    NJ->profiles[node] = AverageProfile(NJ->profiles[c->child[0]],
+					NJ->profiles[c->child[1]],
+					NJ->nPos, NJ->nConstraints,
+					NJ->distance_matrix,
+					weight1);
 }
 
 /* bionjWeight is the weight of the first sequence (between 0 and 1),
@@ -2987,6 +3299,7 @@ profile_t *AverageProfile(profile_t *profile1, profile_t *profile2,
     out->nOn[i] = profile1->nOn[i] + profile2->nOn[i];
     out->nOff[i] = profile1->nOff[i] + profile2->nOff[i];
   }
+  profileAvgOps++;
   return(out);
 }
 
@@ -3338,34 +3651,32 @@ void SetupDistanceMatrix(/*IN/OUT*/distance_matrix_t *dmat) {
 
 nni_t ChooseNNI(profile_t *profiles[4],
 		/*OPTIONAL*/distance_matrix_t *dmat,
-		int nPos, int nConstraints) {
+		int nPos, int nConstraints,
+		/*OUT*/double criteria[3]) {
   double d[6];
   CorrectedPairDistances(profiles, 4, dmat, nPos, /*OUT*/d);
   double penalty[3]; 		/* indexed as nni_t */
   QuartetConstraintPenalties(profiles, nConstraints, /*OUT*/penalty);
-  double critABvsCD = d[qAB] + d[qCD] + penalty[ABvsCD];
-  double critACvsBD = d[qAC] + d[qBD] + penalty[ACvsBD];
-  double critADvsBC = d[qAD] + d[qBC] + penalty[ADvsBC];
+  criteria[ABvsCD] = d[qAB] + d[qCD] + penalty[ABvsCD];
+  criteria[ACvsBD] = d[qAC] + d[qBD] + penalty[ACvsBD];
+  criteria[ADvsBC] = d[qAD] + d[qBC] + penalty[ADvsBC];
 
   nni_t choice = ABvsCD;
-  if (critACvsBD < critABvsCD && critACvsBD <= critADvsBC) {
+  if (criteria[ACvsBD] < criteria[ABvsCD] && criteria[ACvsBD] <= criteria[ADvsBC]) {
     choice = ACvsBD;
-  } else if (critADvsBC < critABvsCD && critADvsBC <= critACvsBD) {
+  } else if (criteria[ADvsBC] < criteria[ABvsCD] && criteria[ADvsBC] <= criteria[ACvsBD]) {
     choice = ADvsBC;
-  }
-  if (choice != ABvsCD) {
-    nNNI++;
   }
   if (verbose > 1 && penalty[choice] > penalty[ABvsCD] + 1e-6) {
     fprintf(stderr, "Worsen constraint: from %.3f to %.3f distance %.3f to %.3f: ",
 	    penalty[ABvsCD], penalty[choice],
-	    critABvsCD, choice == ACvsBD ? critACvsBD : critADvsBC);
+	    criteria[ABvsCD], choice == ACvsBD ? criteria[ACvsBD] : criteria[ADvsBC]);
     int iC;
     for (iC = 0; iC < nConstraints; iC++) {
-      double ppart[6];
+      double ppart[3];
       if (QuartetConstraintPenaltiesPiece(profiles, iC, /*OUT*/ppart)) {
-	double old_penalty = ppart[qAB] + ppart[qCD];
-	double new_penalty = choice == ACvsBD ? ppart[qAC] + ppart[qBD] : ppart[qAD] + ppart[qBC];
+	double old_penalty = ppart[ABvsCD];
+	double new_penalty = ppart[choice];
 	if (new_penalty > old_penalty + 1e-6)
 	  fprintf(stderr, " %d (%d/%d %d/%d %d/%d %d/%d)", iC,
 		  profiles[0]->nOn[iC], profiles[0]->nOff[iC],
@@ -3376,13 +3687,33 @@ nni_t ChooseNNI(profile_t *profiles[4],
     }
     fprintf(stderr,"\n");
   }
-  if (verbose > 2 && nConstraints > 392)
-    fprintf(stderr, "NNI scores ABvsCD %.3f ACvsBD %.3f ADvsBC %.3f\n",
-	    critABvsCD, critACvsBD, critADvsBC);
+  if (verbose > 2)
+    fprintf(stderr, "NNI scores ABvsCD %.5f ACvsBD %.5f ADvsBC %.5f choice %s\n",
+	    criteria[ABvsCD], criteria[ACvsBD], criteria[ADvsBC],
+	    choice == ABvsCD ? "AB|CD" : (choice == ACvsBD ? "AC|BD" : "AD|BC"));
   return(choice);
 }
 
-void NNI(/*IN/OUT*/NJ_t *NJ) {
+double TreeLength(/*IN/OUT*/NJ_t *NJ, bool recomputeProfiles) {
+  if (recomputeProfiles) {
+    traversal_t traversal2 = InitTraversal(NJ);
+    int j = NJ->root;
+    while((j = TraversePostorder(j, NJ, /*IN/OUT*/traversal2)) >= 0) {
+      /* nothing to do for leaves or root */
+      if (j >= NJ->nSeq && j != NJ->root)
+	SetProfile(/*IN/OUT*/NJ, j, /*noweight*/-1.0);
+    }
+    traversal2 = FreeTraversal(traversal2,NJ);
+  }
+  UpdateBranchLengths(/*IN/OUT*/NJ);
+  double total_len = 0;
+  int iNode;
+  for (iNode = 0; iNode < NJ->maxnode; iNode++)
+    total_len += NJ->branchlength[iNode];
+  return(total_len);
+}
+
+void NNI(/*IN/OUT*/NJ_t *NJ, int iRound, int nRounds) {
   /* For each non-root node N, with children A,B, sibling C, and uncle D,
      we compare the current topology AB|CD to the alternate topologies
      AC|BD and AD|BC, by using log-corrected distances on profiles.
@@ -3412,9 +3743,14 @@ void NNI(/*IN/OUT*/NJ_t *NJ) {
   
   traversal_t traversal = InitTraversal(NJ);
   int node = NJ->root;
+  int iDone = 0;
   while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
     if (node < NJ->nSeq || node == NJ->root)
       continue; /* nothing to do for leaves or root */
+    if ((iDone % 100) == 0)
+      ProgressReport("NNI round %3d of %3d, %d of %d splits",
+		     iRound+1, nRounds, iDone+1, NJ->maxnode - NJ->nSeq);
+    iDone++;
 
     profile_t *profiles[4];
     int nodeABC[3];
@@ -3429,10 +3765,15 @@ void NNI(/*IN/OUT*/NJ_t *NJ) {
       fprintf(stderr,"Considering NNI around %d: Swap A=%d B=%d C=%d D=out(C) (node parent %d)\n",
 	      node, nodeA, nodeB, nodeC, NJ->parent[node]);
 
-    nni_t choice = ChooseNNI(profiles, NJ->distance_matrix, NJ->nPos, NJ->nConstraints);
+    double criteria[3];
+    nni_t choice = ChooseNNI(profiles, NJ->distance_matrix, NJ->nPos, NJ->nConstraints,
+			     /*OUT*/criteria);
+    if (choice != ABvsCD)
+      nNNI++;
     if (verbose>1 && choice != ABvsCD)
-      fprintf(stderr,"NNI around %d: Swap A=%d B=%d C=%d D=out(C) -- choose %s\n",
-	      node, nodeA, nodeB, nodeC, choice == ACvsBD ? "AC|BD" : "AD|BC");
+      fprintf(stderr,"NNI around %d: Swap A=%d B=%d C=%d D=out(C) -- choose %s deltaLen %.4f\n",
+	      node, nodeA, nodeB, nodeC, choice == ACvsBD ? "AC|BD" : "AD|BC",
+	      criteria[choice] - criteria[ABvsCD]);
 
     if (choice == ACvsBD) {
       /* swap B and C */
@@ -3444,38 +3785,15 @@ void NNI(/*IN/OUT*/NJ_t *NJ) {
       ReplaceChild(/*IN/OUT*/NJ, NJ->parent[node], nodeC, nodeA);
     }
 
-    /* If slow, remove all up-profiles and recompute all profiles
-       up to root */
-    if (slow) {
-      for (i = 0; i < NJ->maxnodes; i++)
-	DeleteUpProfile(upProfiles, NJ, i);
-
-      /* update profiles back to root */
-      int ancestor;
-      for (ancestor = node; ancestor >= 0; ancestor = NJ->parent[ancestor])
-	RecomputeProfile(/*IN/OUT*/NJ, upProfiles, node);
-
-      /* remove all up-profiles made while doing that*/
-      for (i = 0; i < NJ->maxnodes; i++)
-	DeleteUpProfile(upProfiles, NJ, i);
+    /* update profiles */
+    if (choice == ABvsCD) {
+      /* No longer needed */
+      DeleteUpProfile(upProfiles, NJ, nodeA);
+      DeleteUpProfile(upProfiles, NJ, nodeB);
+      RecomputeProfile(/*IN/OUT*/NJ, /*IN/OUT*/upProfiles, node);
     } else {
-      RecomputeProfile(/*IN/OUT*/NJ, upProfiles, node);
-      int uncle = Sibling(NJ, NJ->parent[node]);
-      if (uncle >= 0)
-	DeleteUpProfile(upProfiles, NJ, uncle);
-
-      if (choice != ABvsCD) {
-	/* Remove stale up-profiles */
-	DeleteUpProfile(upProfiles, NJ, nodeA);
-	DeleteUpProfile(upProfiles, NJ, nodeB);
-	DeleteUpProfile(upProfiles, NJ, nodeC);
-	DeleteUpProfile(upProfiles, NJ, node);
-      } else {
-	/* No longer needed */
-	DeleteUpProfile(upProfiles, NJ, nodeA);
-	DeleteUpProfile(upProfiles, NJ, nodeB);
-      }
-    } /* end if slow */
+      UpdateForNNI(NJ, node, upProfiles);
+    }
   } /* end postorder traversal */
   traversal = FreeTraversal(traversal,NJ);
   if (verbose>1) {
@@ -3488,15 +3806,254 @@ void NNI(/*IN/OUT*/NJ_t *NJ) {
   upProfiles = FreeUpProfiles(upProfiles,NJ);
 }
 
+int FindSPRSteps(/*IN/OUT*/NJ_t *NJ, 
+		 int nodeMove,	 /* the node to move multiple times */
+		 int nodeAround, /* sibling or parent of node to NNI to start the chain */
+		 /*IN/OUT*/profile_t **upProfiles,
+		 /*OUT*/spr_step_t *steps,
+		 int maxSteps,
+		 bool bFirstAC) {
+  int iStep;
+  for (iStep = 0; iStep < maxSteps; iStep++) {
+    if (NJ->child[nodeAround].nChild != 2)
+      break;			/* no further to go */
+
+    /* Consider the NNIs around nodeAround */
+    profile_t *profiles[4];
+    int nodeABC[3];
+    SetupABCD(NJ, nodeAround, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
+    double criteria[3];
+    (void) ChooseNNI(profiles, NJ->distance_matrix, NJ->nPos, NJ->nConstraints,
+		     /*OUT*/criteria);
+
+    /* Do & save the swap */
+    spr_step_t *step = &steps[iStep];
+    if (iStep == 0 ? bFirstAC : criteria[ACvsBD] < criteria[ADvsBC]) {
+      /* swap B & C to put AC together */
+      step->deltaLength = criteria[ACvsBD] - criteria[ABvsCD];
+      step->nodes[0] = nodeABC[1];
+      step->nodes[1] = nodeABC[2];
+    } else {
+      /* swap AC to put AD together */
+      step->deltaLength = criteria[ADvsBC] - criteria[ABvsCD];
+      step->nodes[0] = nodeABC[0];
+      step->nodes[1] = nodeABC[2];
+    }
+
+    if (verbose>1) {
+      fprintf(stderr, "SPR chain step %d for %d around %d swap %d %d deltaLen %.5f\n",
+	      iStep+1, nodeAround, nodeMove, step->nodes[0], step->nodes[1], step->deltaLength);
+      if (verbose>3)
+	PrintNJInternal(stderr, NJ);
+    }
+    ReplaceChild(/*IN/OUT*/NJ, nodeAround, step->nodes[0], step->nodes[1]);
+    ReplaceChild(/*IN/OUT*/NJ, NJ->parent[nodeAround], step->nodes[1], step->nodes[0]);
+    UpdateForNNI(/*IN/OUT*/NJ, nodeAround, /*IN/OUT*/upProfiles);
+
+    /* set the new nodeAround -- either parent(nodeMove) or sibling(nodeMove) --
+       so that it different from current nodeAround
+     */
+    int newAround[2] = { NJ->parent[nodeMove], Sibling(NJ, nodeMove) };
+    if (NJ->parent[nodeMove] == NJ->root)
+      RootSiblings(NJ, nodeMove, /*OUT*/newAround);
+    assert(newAround[0] == nodeAround || newAround[1] == nodeAround);
+    assert(newAround[0] != newAround[1]);
+    nodeAround = newAround[newAround[0] == nodeAround ? 1 : 0];
+  }
+  return(iStep);
+}
+
+void UnwindSPRStep(/*IN/OUT*/NJ_t *NJ,
+		   /*IN*/spr_step_t *step,
+		   /*IN/OUT*/profile_t **upProfiles) {
+  int parents[2];
+  int i;
+  for (i = 0; i < 2; i++) {
+    assert(step->nodes[i] >= 0 && step->nodes[i] < NJ->maxnodes);
+    parents[i] = NJ->parent[step->nodes[i]];
+    assert(parents[i] >= 0);
+  }
+  assert(parents[0] != parents[1]);
+  ReplaceChild(/*IN/OUT*/NJ, parents[0], step->nodes[0], step->nodes[1]);
+  ReplaceChild(/*IN/OUT*/NJ, parents[1], step->nodes[1], step->nodes[0]);
+  int iYounger = 0;
+  if (NJ->parent[parents[0]] == parents[1]) {
+    iYounger = 0;
+  } else {
+    assert(NJ->parent[parents[1]] == parents[0]);
+    iYounger = 1;
+  }
+  UpdateForNNI(/*IN/OUT*/NJ, parents[iYounger], /*IN/OUT*/upProfiles);
+}
+
+/* Update the profile of node and its ancestor, and delete nearby out-profiles */
+void UpdateForNNI(/*IN/OUT*/NJ_t *NJ, int node, /*IN/OUT*/profile_t **upProfiles) {
+  int i;
+  if (slow) {
+    /* exhaustive update */
+    for (i = 0; i < NJ->maxnodes; i++)
+      DeleteUpProfile(upProfiles, NJ, i);
+
+    /* update profiles back to root */
+    int ancestor;
+    for (ancestor = node; ancestor >= 0; ancestor = NJ->parent[ancestor])
+      RecomputeProfile(/*IN/OUT*/NJ, upProfiles, ancestor);
+
+    /* remove any up-profiles made while doing that*/
+    for (i = 0; i < NJ->maxnodes; i++)
+      DeleteUpProfile(upProfiles, NJ, i);
+  } else {
+    /* if fast, only update around self */
+    DeleteUpProfile(upProfiles, NJ, node);
+    for (i = 0; i < NJ->child[node].nChild; i++)
+      DeleteUpProfile(upProfiles, NJ, NJ->child[node].child[i]);
+    assert(node != NJ->root);
+    int parent = NJ->parent[node];
+    int neighbors[2] = { parent, Sibling(NJ, node) };
+    if (parent == NJ->root)
+      RootSiblings(NJ, node, /*OUT*/neighbors);
+    DeleteUpProfile(upProfiles, NJ, neighbors[0]);
+    DeleteUpProfile(upProfiles, NJ, neighbors[1]);
+    int uncle = Sibling(NJ, parent);
+    if (uncle >= 0)
+      DeleteUpProfile(upProfiles, NJ, uncle);
+    RecomputeProfile(/*IN/OUT*/NJ, upProfiles, node);
+    RecomputeProfile(/*IN/OUT*/NJ, upProfiles, parent);
+  }
+}
+
+void SPR(/*IN/OUT*/NJ_t *NJ, int maxSPRLength, int iRound, int nRounds) {
+  /* Given a non-root node N with children A,B, sibling C, and uncle D,
+     we can try to move A by doing three types of moves (4 choices):
+     "down" -- swap A with a child of B (if B is not a leaf) [2 choices]
+     "over" -- swap B with C
+     "up" -- swap A with D
+     We follow down moves with down moves, over moves with down moves, and
+     up moves with either up or over moves. (Other choices are just backing
+     up and hence useless.)
+
+     As with NNIs, we keep track of up-profiles as we go. However, some of the regular
+     profiles may also become "stale" so it is a bit trickier.
+
+     We store the traversal before we do SPRs to avoid any possible infinite loop
+  */
+  double last_tot_len = 0.0;
+  if (NJ->nSeq <= 3 || maxSPRLength < 1)
+    return;
+  if (slow)
+    last_tot_len = TreeLength(NJ, /*recomputeLengths*/true);
+  int *nodeList = mymalloc(sizeof(int) * NJ->maxnodes);
+  int nodeListLen = 0;
+  traversal_t traversal = InitTraversal(NJ);
+  int node = NJ->root;
+  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
+    nodeList[nodeListLen++] = node;
+  }
+  assert(nodeListLen == NJ->maxnode);
+  traversal = FreeTraversal(traversal,NJ);
+
+  profile_t **upProfiles = UpProfiles(NJ);
+  spr_step_t *steps = mymalloc(sizeof(spr_step_t) * maxSPRLength); /* current chain of SPRs */
+
+  int i;
+  for (i = 0; i < nodeListLen; i++) {
+    node = nodeList[i];
+    if (node == NJ->root)
+      continue; /* nothing to do for root */
+    if ((i % 100) == 0)
+      ProgressReport("SPR round %3d of %3d, %d of %d splits",
+		     iRound+1, nRounds, i+1, nodeListLen);
+    /* The nodes to NNI around */
+    int nodeAround[2] = { NJ->parent[node], Sibling(NJ, node) };
+    if (NJ->parent[node] == NJ->root) {
+      /* NNI around both siblings instead */
+      RootSiblings(NJ, node, /*OUT*/nodeAround);
+    }
+    bool bChanged = false;
+    int iAround;
+    for (iAround = 0; iAround < 2 && bChanged == false; iAround++) {
+      int ACFirst;
+      for (ACFirst = 0; ACFirst < 2 && bChanged == false; ACFirst++) {
+	if(verbose > 3)
+	  PrintNJInternal(stderr, NJ);
+	int chainLength = FindSPRSteps(/*IN/OUT*/NJ, node, nodeAround[iAround],
+				       upProfiles, /*OUT*/steps, maxSPRLength, (bool)ACFirst);
+	double dMinDelta = 0.0;
+	int iCBest = -1;
+	double dTotDelta = 0.0;
+	int iC;
+	for (iC = 0; iC < chainLength; iC++) {
+	  dTotDelta += steps[iC].deltaLength;
+	  if (dTotDelta < dMinDelta) {
+	    dMinDelta = dTotDelta;
+	    iCBest = iC;
+	  }
+	}
+      
+	if (verbose>1) {
+	  fprintf(stderr, "SPR %s %d around %d chainLength %d of %d deltaLength %.5f swaps:",
+		  iCBest >= 0 ? "move" : "abandoned",
+		  node,nodeAround[iAround],iCBest+1,chainLength,dMinDelta);
+	  for (iC = 0; iC < chainLength; iC++)
+	    fprintf(stderr, " (%d,%d)%.4f", steps[iC].nodes[0], steps[iC].nodes[1], steps[iC].deltaLength);
+	  fprintf(stderr,"\n");
+	}
+	for (iC = chainLength - 1; iC > iCBest; iC--)
+	  UnwindSPRStep(/*IN/OUT*/NJ, /*IN*/&steps[iC], /*IN/OUT*/upProfiles);
+	if(verbose > 3)
+	  PrintNJInternal(stderr, NJ);
+	while (slow && iCBest >= 0) {
+	  double expected_tot_len = last_tot_len + dMinDelta;
+	  double new_tot_len = TreeLength(NJ, /*recompute*/true);
+	  if (verbose > 1)
+	    fprintf(stderr, "Total branch-length is now %.4f was %.4f expected %.4f\n",
+		    new_tot_len, last_tot_len, expected_tot_len);
+	  if (new_tot_len < last_tot_len) {
+	    last_tot_len = new_tot_len;
+	    break;		/* no rewinding necessary */
+	  }
+	  if (verbose > 1)
+	    fprintf(stderr, "Rewinding SPR to %d\n",iCBest);
+	  UnwindSPRStep(/*IN/OUT*/NJ, /*IN*/&steps[iCBest], /*IN/OUT*/upProfiles);
+	  dMinDelta -= steps[iCBest].deltaLength;
+	  iCBest--;
+	}
+	if (iCBest >= 0)
+	  bChanged = true;
+      }	/* loop over which step to take at 1st NNI */
+    } /* loop over which node to pivot around */
+
+    if (bChanged) {
+      nSPR++;		/* the SPR move is OK */
+      /* make sure all the profiles are OK */
+      int j;
+      for (j = 0; j < NJ->maxnodes; j++)
+	DeleteUpProfile(upProfiles, NJ, j);
+      int ancestor;
+      for (ancestor = NJ->parent[node]; ancestor >= 0; ancestor = NJ->parent[ancestor])
+	RecomputeProfile(/*IN/OUT*/NJ, upProfiles, ancestor);
+    }
+  } /* end loop over subtrees to prune & regraft */
+  steps = myfree(steps, sizeof(spr_step_t) * maxSPRLength);
+  upProfiles = FreeUpProfiles(upProfiles,NJ);
+  nodeList = myfree(nodeList, sizeof(int) * NJ->maxnodes);
+}
 
 void RecomputeProfile(/*IN/OUT*/NJ_t *NJ, /*IN/OUT*/profile_t **upProfiles, int node) {
-  assert(node >= NJ->nSeq && node != NJ->root);
+  if (node < NJ->nSeq || node == NJ->root)
+    return;			/* no profile to compute */
   assert(NJ->child[node].nChild==2);
 
   profile_t *profiles[4];
-  int nodeABC[3];
-  SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
-  double weight = QuartetWeight(profiles, NJ->distance_matrix, NJ->nPos);
+  double weight = 0.5;
+  if (!bionj) {
+    profiles[0] = NJ->profiles[NJ->child[node].child[0]];
+    profiles[1] = NJ->profiles[NJ->child[node].child[1]];
+  } else {
+    int nodeABC[3];
+    SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
+    weight = QuartetWeight(profiles, NJ->distance_matrix, NJ->nPos);
+  }
   if (verbose>2)
     fprintf(stderr, "Recompute %d from %d %d weight %.3f\n",
 	    node, NJ->child[node].child[0], NJ->child[node].child[1], weight);
@@ -3655,9 +4212,14 @@ void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ) {
   profile_t **upProfiles = UpProfiles(NJ);
   traversal_t traversal = InitTraversal(NJ);
   int node = NJ->root;
+  int iNodesDone = 0;
   while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
     if (node < NJ->nSeq || node == NJ->root)
       continue; /* nothing to do for leaves or root */
+
+    if(iNodesDone > 0 && (iNodesDone % 100) == 0)
+      ProgressReport("Local bootstrap for %6d of %6d internal splits", iNodesDone, NJ->nSeq-3, 0, 0);
+    iNodesDone++;
 
     profile_t *profiles[4];
     int nodeABC[3];
@@ -3772,6 +4334,7 @@ void TestSplits(NJ_t *NJ, /*OUT*/SplitCount_t *splitcount) {
   profile_t **upProfiles = UpProfiles(NJ);
   traversal_t traversal = InitTraversal(NJ);
   int node = NJ->root;
+
   while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
     if (node < NJ->nSeq || node == NJ->root)
       continue; /* nothing to do for leaves or root */
@@ -3803,12 +4366,7 @@ void TestSplits(NJ_t *NJ, /*OUT*/SplitCount_t *splitcount) {
 	nConstraintsViolated++;
 	if (verbose > 1) {
 	  double penalty[3] = {0.0,0.0,0.0};
-	  double piece[6];
-	  if (QuartetConstraintPenaltiesPiece(profiles, iC, /*OUT*/piece)) {
-	    penalty[ABvsCD] = piece[qAB] + piece[qCD];
-	    penalty[ACvsBD] = piece[qAC] + piece[qBD];
-	    penalty[ADvsBC] = piece[qAD] + piece[qBC];
-	  }
+	  (void)QuartetConstraintPenaltiesPiece(profiles, iC, /*OUT*/penalty);
 	  fprintf(stderr, "Violate constraint %d at %d (children %d %d) penalties %.3f %.3f %.3f %d/%d %d/%d %d/%d %d/%d\n",
 		  iC, node, NJ->child[node].child[0], NJ->child[node].child[1],
 		  penalty[ABvsCD], penalty[ACvsBD], penalty[ADvsBC],
@@ -3983,6 +4541,8 @@ void SetDistCriterion(/*IN/OUT*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *hit)
 		NJ->nPos, NJ->distance_matrix, /*OUT*/hit);
     hit->dist -= (NJ->diameter[hit->i] + NJ->diameter[hit->j]);
   }
+  hit->dist += constraintWeight
+    * (double)JoinConstraintPenalty(NJ, hit->i, hit->j);
   SetCriterion(NJ,nActive,/*IN/OUT*/hit);
 }
 
@@ -3998,13 +4558,18 @@ void SetCriterion(/*IN/OUT*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join) {
   int nDiffAllow = tophitsMult > 0 ? (int)(nActive*staleOutLimit) : 0;
   if (NJ->nOutDistActive[join->i] - nActive > nDiffAllow)
     SetOutDistance(NJ, join->i, nActive);
-  if (NJ->nOutDistActive[join->j] > nDiffAllow)
+  if (NJ->nOutDistActive[join->j] - nActive > nDiffAllow)
     SetOutDistance(NJ, join->j, nActive);
-  double penalty = JoinConstraintPenalty(NJ, nActive, join->i, join->j);
-  join->criterion = penalty + join->dist - (NJ->outDistances[join->i]+NJ->outDistances[join->j])/(double)(nActive-2);
+  double outI = NJ->outDistances[join->i];
+  if (NJ->nOutDistActive[join->i] != nActive)
+    outI *= (nActive-1)/(double)(NJ->nOutDistActive[join->i]-1);
+  double outJ = NJ->outDistances[join->j];
+  if (NJ->nOutDistActive[join->j] != nActive)
+    outJ *= (nActive-1)/(double)(NJ->nOutDistActive[join->j]-1);
+  join->criterion = join->dist - (outI+outJ)/(double)(nActive-2);
   if (verbose > 2 && nActive <= 5) {
-    fprintf(stderr, "Set Criterion to join %d %d with nActive=%d dist %.3f penalty %.3f criterion %.3f\n",
-	    join->i, join->j, nActive, join->dist, penalty, join->criterion);
+    fprintf(stderr, "Set Criterion to join %d %d with nActive=%d dist+penalty %.3f criterion %.3f\n",
+	    join->i, join->j, nActive, join->dist, join->criterion);
   }
 }
 
@@ -4091,7 +4656,11 @@ int CompareSeeds(const void *c1, const void *c2) {
 
 /* Using the seed heuristic and the close global variable */
 void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits) {
-
+  double close = tophitsClose;
+  if (close < 0) {
+    double logN = log((double)NJ->nSeq)/log(2.0);
+    close = logN/(logN+2.0);
+  }
   /* Sort the potential seeds, by a combination of nGaps and NJ->outDistances
      We don't store nGaps so we need to compute that
   */
@@ -4117,6 +4686,8 @@ void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits) {
   int iSeed;
   for(iSeed=0; iSeed < NJ->nSeq; iSeed++) {
     int seed = seeds[iSeed];
+    if (iSeed > 0 && (iSeed % 100) == 0)
+      ProgressReport("Top hits for %6d of %6d unique sequences", iSeed, NJ->nSeq, 0, 0);
     if (tophits[seed] != NULL) {
       if(verbose>2) fprintf(stderr, "Skipping seed %d\n", seed);
       continue;
@@ -4128,7 +4699,7 @@ void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits) {
     tophits[seed] = SortSaveBestHits(besthitsSeed, seed, /*IN-SIZE*/NJ->nSeq, /*OUT-SIZE*/m);
 
     /* find "close" neighbors and compute their top hits */
-    double neardist = besthitsSeed[2*m-1].dist * tophitsClose;
+    double neardist = besthitsSeed[2*m-1].dist * close;
     /* must have at least average weight, rem higher is better
        and allow a bit more than average, e.g. if we are looking for within 30% away,
        20% more gaps than usual seems OK
@@ -4210,6 +4781,8 @@ int GetBestFromTopHits(int iNode,
 			int nTopHits) {
   assert(NJ->parent[iNode] < 0);
   int bestIndex = -1;
+  if(!fastest)
+    SetOutDistance(NJ, iNode, nActive); /* ensure out-distances are not stale */
 
   int iBest;
   for(iBest=0; iBest<nTopHits; iBest++) {
@@ -4220,7 +4793,10 @@ int GetBestFromTopHits(int iNode,
     /* Walk up to active node and compute new distance value if necessary */
     int j = hit->j;
     while(NJ->parent[j] >= 0) j = NJ->parent[j];
-    if (iNode == j) continue;
+    if (iNode == j)
+      continue;
+    if(!fastest)
+      SetOutDistance(NJ, j, nActive); /* ensure out-distances are not stale */
     if (j != hit->j) {
       hit->j = j;
       SetDistCriterion(NJ, nActive, /*IN/OUT*/hit);
@@ -4278,7 +4854,8 @@ void TopHitJoin(/*IN/OUT*/NJ_t *NJ,
 		int m,
 		/*IN/OUT*/besthit_t **tophits,
 		/*IN/OUT*/int *tophitAge,
-		/*IN/OUT*/besthit_t *visible) {
+		/*IN/OUT*/besthit_t *visible,
+		/*IN/OUT*/int *topvisible) {
   besthit_t *combinedList = (besthit_t*)mymalloc(sizeof(besthit_t)*2*m);
   assert(NJ->child[newnode].nChild == 2);
   assert(tophits[newnode] == NULL);
@@ -4294,6 +4871,13 @@ void TopHitJoin(/*IN/OUT*/NJ_t *NJ,
   besthit_t *uniqueList = UniqueBestHits(NJ, newnode, combinedList, 2*m, /*OUT*/&nUnique);
   combinedList = myfree(combinedList, sizeof(besthit_t)*2*m);
 
+  /* Forget the top-hit lists of the joined nodes */
+  int c;
+  for(c = 0; c < NJ->child[newnode].nChild; c++) {
+    int child = NJ->child[newnode].child[c];
+    tophits[child] = myfree(tophits[child], m*sizeof(besthit_t));
+  }
+
   tophitAge[newnode] = tophitAge[NJ->child[newnode].child[0]];
   if (tophitAge[newnode] < tophitAge[NJ->child[newnode].child[1]])
     tophitAge[newnode] = tophitAge[NJ->child[newnode].child[1]];
@@ -4304,10 +4888,14 @@ void TopHitJoin(/*IN/OUT*/NJ_t *NJ,
   */
   int tophitAgeLimit = (int)(0.5 + log((double)m)/log(2.0));
   if (tophitAgeLimit < 1) tophitAgeLimit = 1;
-  tophitAgeLimit++;		/* make it a bit more conservative, we have tophitsRefresh threshold too */
+  tophitAgeLimit++;		/* make it a bit conservative, we have the tophitsRefresh threshold too */
 
-  /* UniqueBestHits eliminates hits to self, so if nUnique==nActive-1,
+  /* Either use the merged list as candidate top hits or do a refresh
+     UniqueBestHits eliminates hits to self, so if nUnique==nActive-1,
      we've already done the exhaustive search.
+
+     Either way, we set tophits, visible(newnode), update visible of its top hits,
+     and modify topvisible: if we do a refresh, then we reset it, otherwise we update
   */
   if (nUnique==nActive-1
       || (nUnique >= (int)(0.5+m*tophitsRefresh)
@@ -4319,6 +4907,9 @@ void TopHitJoin(/*IN/OUT*/NJ_t *NJ,
     for (iHit = 0; iHit < nUnique; iHit++)
       SetDistCriterion(NJ, nActive, /*IN/OUT*/&uniqueList[iHit]);
     tophits[newnode] = SortSaveBestHits(uniqueList, newnode, /*nIn*/nUnique, /*nOut*/m);
+    visible[newnode] = tophits[newnode][0];
+    ResetVisible(NJ, nActive, tophits[newnode], m, /*IN/OUT*/visible, topvisible);
+    UpdateTopVisible(NJ, visible, /*IN/UPDATE*/topvisible, m, newnode);
   } else {
     /* need to refresh: set top hits for node and for its top hits */
     if(verbose>1) fprintf(stderr,"Top hits for %d by refresh (%d unique age %d) nActive=%d\n",
@@ -4326,21 +4917,21 @@ void TopHitJoin(/*IN/OUT*/NJ_t *NJ,
     nRefreshTopHits++;
     tophitAge[newnode] = 0;
 
-    /* update all out-distances */
     int iNode;
+    /* update all out-distances */
     for (iNode = 0; iNode < NJ->maxnode; iNode++) {
       if (NJ->parent[iNode] < 0)
 	SetOutDistance(/*IN/OUT*/NJ, iNode, nActive);
     }
 
-    /* exhaustively get the best 2*m hits for newnode */
+    /* exhaustively get the best 2*m hits for newnode, set visible, and save the top m */
     besthit_t *allhits = (besthit_t*)mymalloc(sizeof(besthit_t)*NJ->maxnode);
     assert(2*m <= NJ->maxnode);
     SetBestHit(newnode, NJ, nActive, /*OUT*/&visible[newnode], /*OUT*/allhits);
     qsort(/*IN/OUT*/allhits, NJ->maxnode, sizeof(besthit_t), CompareHitsByCriterion);
-
-    /* set its top hit list  */
     tophits[newnode] = SortSaveBestHits(allhits, newnode, /*nIn*/NJ->maxnode, /*nOut*/m);
+
+    /* Do not need to call ResetVisible becaues we will reset visible from its top hits, below */
 
     /* And use the top 2*m entries to expand other best-hit lists, but only for top m */
     besthit_t *bothList = (besthit_t*)mymalloc(sizeof(besthit_t)*3*m);
@@ -4365,32 +4956,21 @@ void TopHitJoin(/*IN/OUT*/NJ_t *NJ,
       besthit_t *uniqueList2 = UniqueBestHits(NJ, iNode, bothList, 3*m, /*OUT*/&nUnique2);
       tophits[iNode] = myfree(tophits[iNode], m*sizeof(besthit_t));
       tophits[iNode] = SortSaveBestHits(uniqueList2, iNode, /*nIn*/nUnique2, /*nOut*/m);
+      visible[iNode] = tophits[iNode][0]; /* will update topvisible below */
       uniqueList2 = myfree(uniqueList2, 3*m*sizeof(besthit_t));
-
-      visible[iNode] = tophits[iNode][GetBestFromTopHits(iNode,NJ,nActive,tophits[iNode],m)];
-      ResetVisible(NJ, nActive, tophits[iNode], m, /*IN/OUT*/visible);
     }
+    ResetTopVisible(NJ, nActive, visible, /*OUT*/topvisible, m);
     bothList = myfree(bothList,3*m*sizeof(besthit_t));
     allhits = myfree(allhits,sizeof(besthit_t)*NJ->maxnode);
   }
-  /* Still need to set visible[newnode] and reset */
-  visible[newnode] = tophits[newnode][GetBestFromTopHits(newnode,NJ,nActive,tophits[newnode],m)];
-  ResetVisible(NJ, nActive, tophits[newnode], m, /*IN/OUT*/visible);
-
   uniqueList = myfree(uniqueList, 2*m*sizeof(besthit_t));
-
-  /* Forget top-hit list of children */
-  int c;
-  for(c = 0; c < NJ->child[newnode].nChild; c++) {
-    int child = NJ->child[newnode].child[c];
-    tophits[child] = myfree(tophits[child], m*sizeof(besthit_t));
-  }
 }
 
 void ResetVisible(NJ_t *NJ, int nActive,
 		   /*IN*/besthit_t *tophits,
 		   int nTopHits,
-		   /*IN/UPDATE*/besthit_t *visible) {
+		  /*IN/UPDATE*/besthit_t *visible,
+		  /*OPTIONAL IN/UPDATE*/int *topvisible) {
   int iHit;
 
   /* reset visible set for all top hits of node */
@@ -4403,21 +4983,112 @@ void ResetVisible(NJ_t *NJ, int nActive,
       visible[hit->j] = *hit;
       visible[hit->j].j = visible[hit->j].i;
       visible[hit->j].i = hit->j;
+      if (topvisible != NULL)
+	UpdateTopVisible(NJ, visible, /*IN/UPDATE*/topvisible, nTopHits, hit->j);
       if(verbose>5) fprintf(stderr,"NewVisible %d %d %f %f\n",
-			    hit->j,visible[hit->j].j,visible[hit->j].dist,visible[hit->j].criterion);
+			    hit->j,visible[hit->j].j,visible[hit->j].dist,
+			    visible[hit->j].criterion);
     } else {
       /* see if this is a better hit -- if it is, "reset" */
-      SetCriterion(/*IN/OUT*/NJ, nActive, /*IN/OUT*/&visible[hit->j]);
+      SetCriterion(/*IN/OUT*/NJ, nActive, /*IN/OUT*/&visible[hit->j]); /* may change out-dists */
       if (hit->criterion < visible[hit->j].criterion) {
 	visible[hit->j] = *hit;
 	visible[hit->j].j = visible[hit->j].i;
 	visible[hit->j].i = hit->j;
+	if (topvisible != NULL)
+	  UpdateTopVisible(NJ, visible, /*IN/UPDATE*/topvisible, nTopHits, hit->j);
 	if(verbose>5) fprintf(stderr,"ResetVisible %d %d %f %f\n",
-			      hit->j,visible[hit->j].j,visible[hit->j].dist,visible[hit->j].criterion);
+			      hit->j,visible[hit->j].j,visible[hit->j].dist,
+			      visible[hit->j].criterion);
 	nVisibleReset++;
       }
     }
   } /* end loop over hits */
+}
+
+/* Update the top-visible list to perhaps include visible[iNode] */
+void UpdateTopVisible(/*IN*/NJ_t * NJ,
+		      /*IN*/besthit_t *visible,
+		      /*IN/UPDATE*/int *topvisible,
+		      int m, 	/* length of topvisible */
+		      int iNewNode) {
+  assert(topvisible != NULL);
+
+  /* First, if the list is not full, put it in somewhere;
+     otherwise, remember the worst hit
+  */
+  int iPosWorst = -1;
+  double dCriterionWorst = -1e20;
+  int i;
+  for (i = 0; i < m; i++) {
+    int iNode = topvisible[i];
+    if (iNode < 0 || NJ->parent[iNode] >= 0) {
+      topvisible[i] = iNewNode;
+      return;
+    } else if (visible[iNode].criterion >= dCriterionWorst) {
+      iPosWorst = i;
+    }
+  }
+  /* Otherwise, may replace worst element in the list */
+  if (visible[iNewNode].criterion < dCriterionWorst) {
+    assert(iPosWorst >= 0);
+    topvisible[iPosWorst] = iNewNode;
+  }
+}
+
+/* Recompute the topvisible list */
+void ResetTopVisible(/*IN*/NJ_t *NJ,
+		     int nActive,
+		     /*IN*/besthit_t *visible,
+		     /*OUT*/int *topvisible,
+		     int m) {	/* length of topvisible */
+  besthit_t *visibleSorted = mymalloc(sizeof(besthit_t)*nActive);
+  int nVisible = 0;		/* #entries in visibleSorted */
+  int iNode;
+  for (iNode = 0; iNode < NJ->maxnode; iNode++) {
+    /* skip joins involving stale nodes or joins we've already saved */
+    if (NJ->parent[iNode] >= 0) continue;
+    assert(visible[iNode].i == iNode);
+    int j = visible[iNode].j;
+    assert(j >= 0);
+    while (NJ->parent[j] >= 0) {
+      j = NJ->parent[j];
+    }
+    if (j < iNode && visible[j].j == iNode) continue;	/* keep only 1 direction of the hit */
+    if (j != visible[iNode].j) {
+      /* we moved up teh list */
+      visible[iNode].j = j;
+      SetDistCriterion(NJ, nActive, /*IN/OUT*/&visible[iNode]);
+    } else {
+      /* just make sure out-distances are up to date */
+      SetCriterion(/*IN/OUT*/NJ, nActive, &visible[iNode]);
+    }
+    assert(nVisible < nActive);
+    visibleSorted[nVisible++] = visible[iNode];
+  }
+  assert(nVisible > 0);
+    
+  qsort(/*IN/OUT*/visibleSorted,nVisible,sizeof(besthit_t),CompareHitsByCriterion);
+    
+  /* Only keep the top m items, and make sure their out-distances are up to date */
+  if (verbose > 2)
+    fprintf(stderr, "top-hit search: nActive %d nVisible %d considering up to %d items\n",
+	    nActive, nVisible, m);
+  if(nVisible > m) nVisible = m;
+    
+  int iBest;
+  for (iBest = 0; iBest < nVisible; iBest++)
+    SetCriterion(/*IN/OUT*/NJ, nActive, /*IN/OUT*/&visibleSorted[iBest]);
+    
+  qsort(/*IN/OUT*/visibleSorted,nVisible,sizeof(besthit_t),CompareHitsByCriterion);
+
+  /* save the sorted indices in topvisible */
+  int i;
+  for (i = 0; i < nVisible; i++)
+    topvisible[i] = visibleSorted[i].i;
+  while(i < m)
+    topvisible[i++] = -1;
+  myfree(visibleSorted, sizeof(besthit_t)*nActive);
 }
 
 /*
@@ -4432,42 +5103,57 @@ void ResetVisible(NJ_t *NJ, int nActive,
 */
 void TopHitNJSearch(/*IN/OUT*/NJ_t *NJ, int nActive, int m,
 		    /*IN/OUT*/besthit_t *visible,
+		    /*IN/OUT*/int *topvisible,
+		    /*IN/OUT*/int *topvisibleAge,
 		    /*IN/OUT*/besthit_t **tophits,
 		    /*OUT*/besthit_t *join) {
-  besthit_t *visibleSorted = mymalloc(sizeof(besthit_t)*nActive);
-  int nVisible = 0;		/* #entries in visibleSorted */
-  int iNode;
-  for (iNode = 0; iNode < NJ->maxnode; iNode++) {
-    /* skip joins involving stale nodes or joins we've already saved */
-    if (NJ->parent[iNode] >= 0) continue;
-    assert(visible[iNode].i == iNode);
-    int j = visible[iNode].j;
-    if(NJ->parent[j] >= 0) continue;
-    if (j < iNode && visible[j].j == iNode) continue;
-
-    assert(nVisible < nActive);
-    visibleSorted[nVisible++] = visible[iNode];
+  /* first, do we have at least m/2 candidates in topvisible?
+     And remember the best one */
+  int nCandidate = 0;
+  int iNodeBestCandidate = -1;
+  double dBestCriterion = 1e20;
+  int i;
+  for (i = 0; i < m; i++) {
+    if (topvisible[i] >= 0 && NJ->parent[topvisible[i]] < 0) {
+      nCandidate++;
+      int iNode = topvisible[i];
+      assert(visible[iNode].i == iNode);
+      int j = visible[iNode].j;
+      assert(j >= 0);
+      while (NJ->parent[j] >= 0)
+	j = NJ->parent[j];
+      if (j != visible[iNode].j) {
+	visible[iNode].j = j;
+	SetDistCriterion(NJ, nActive, /*IN/OUT*/&visible[iNode]);
+      } else {
+	/* just make sure out-distances are up to date */
+	SetCriterion(/*IN/OUT*/NJ, nActive, &visible[iNode]);
+      }
+      if (iNodeBestCandidate < 0 || visible[iNode].criterion < dBestCriterion) {
+	iNodeBestCandidate = iNode;
+	dBestCriterion = visible[iNode].criterion;
+      }
+    }
   }
-  assert(nVisible > 0);
+  (*topvisibleAge)++;
+  if (2 * (*topvisibleAge) > m ||  (2*nCandidate < m && 2*nCandidate < nActive)) {
+    /* recompute top visible */
+    if (verbose > 1)
+      fprintf(stderr, "Resetting the top-visible list at nActive=%d\n",nActive);
+    ResetTopVisible(NJ, nActive, visible, /*OUT*/topvisible, m);
+    iNodeBestCandidate = topvisible[0];
+    *topvisibleAge = 0;
+  } else {
+    if (verbose > 1)
+      fprintf(stderr, "Top-visible list size %d (nActive %d m %d)\n",
+	      nCandidate, nActive, m);
+  }
+  assert(iNodeBestCandidate >= 0 && NJ->parent[iNodeBestCandidate] < 0);
+  *join = visible[iNodeBestCandidate];
+  assert(join->j >= 0 && NJ->parent[join->j] < 0);
 
-  qsort(/*IN/OUT*/visibleSorted,nVisible,sizeof(besthit_t),CompareHitsByCriterion);
-
-  /* Only keep the top m items */
-  if (verbose > 2)
-    fprintf(stderr, "top-hit search: nActive %d nVisible %d considering up to %d items\n",
-	    nActive, nVisible, m);
-  if(nVisible > m) nVisible = m;
-
-  int iBest;
-  for (iBest = 0; iBest < nVisible; iBest++)
-    SetCriterion(/*IN/OUT*/NJ, nActive, /*IN/OUT*/&visibleSorted[iBest]);
-
-  qsort(/*IN/OUT*/visibleSorted,nVisible,sizeof(besthit_t),CompareHitsByCriterion);
-
-  *join = visibleSorted[0];
-  visibleSorted = myfree(visibleSorted, sizeof(besthit_t)*nActive);
-
-  if(fastest) return;
+  if(fastest)
+    return;
 
   int changed;
   do {
@@ -4958,7 +5644,7 @@ profile_t *GetUpProfile(/*IN/OUT*/profile_t **upProfiles, NJ_t *NJ, int outnode)
       SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
       profile_t *profilesCDAB[4] = { profiles[2], profiles[3], profiles[0], profiles[1] };
       double weight = QuartetWeight(profilesCDAB, NJ->distance_matrix, NJ->nPos);
-      if (verbose>2)
+      if (verbose>3)
 	fprintf(stderr, "Compute upprofile of %d from %d and parents (vs. children %d %d) with weight %.3f\n",
 		node, nodeABC[2], nodeABC[0], nodeABC[1], weight);
       upProfiles[node] = AverageProfile(profiles[2], profiles[3],
