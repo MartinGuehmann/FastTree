@@ -2,13 +2,15 @@
  * FastTree -- inferring approximately-maximum-likelihood trees for large
  * multiple sequence alignments.
  *
- * Morgan N. Price, 2008-2009
+ * Morgan N. Price, 2008-2011
  * http://www.microbesonline.org/fasttree/
  *
  * Thanks to Jim Hester of the Cleveland Clinic Foundation for
- * providing the first parallel (OpenMP) code
+ * providing the first parallel (OpenMP) code, Siavash Mirarab of
+ * UT Austin for implementing the WAG option, and Samuel Shepard
+ * at the CDC for suggesting and helping with the -quote option.
  *
- *  Copyright (C) 2008-2009 The Regents of the University of California
+ *  Copyright (C) 2008-2011 The Regents of the University of California
  *  All rights reserved.
  *
  *  This program is free software; you can redistribute it and/or modify
@@ -317,7 +319,7 @@
 #define IS_ALIGNED(X) 1
 #endif
 
-#define FT_VERSION "2.1.3"
+#define FT_VERSION "2.1.4"
 
 char *usage =
   "  FastTree protein_alignment > tree\n"
@@ -339,6 +341,10 @@ char *usage =
   "        (for faster global bootstrap on huge alignments)\n"
   "  -pseudo to use pseudocounts (recommended for highly gapped sequences)\n"
   "  -gtr -- generalized time-reversible model (nucleotide alignments only)\n"
+  "  -wag -- Whelan-And-Goldman 2001 model (amino acid alignments only)\n"
+  "  -quote -- allow spaces and other restricted characters (but not ' characters) in\n"
+  "             sequence names and quote names in the output tree (fasta input only;\n"
+  "             FastTree will not be able to read these trees back in\n"
   "  -noml to turn off maximum-likelihood\n"
   "  -nome to turn off minimum-evolution NNIs and SPRs\n"
   "        (recommended if running additional ML NNIs with -intree)\n"
@@ -353,7 +359,8 @@ char *usage =
   "For more information, see http://www.microbesonline.org/fasttree/\n";
 
 char *expertUsage =
-  "FastTree [-nt] [-n 100] [-pseudo | -pseudo 1.0]  [-boot 1000 | -nosupport]\n"
+  "FastTree [-nt] [-n 100] [-quote] [-pseudo | -pseudo 1.0]\n"
+  "           [-boot 1000 | -nosupport]\n"
   "           [-intree starting_trees_file | -intree1 starting_tree_file]\n"
   "           [-quiet | -nopr]\n"
   "           [-nni 10] [-spr 2] [-noml | -mllen | -mlnni 10]\n"
@@ -361,7 +368,7 @@ char *expertUsage =
   "           [-slow | -fastest] [-2nd | -no2nd] [-slownni] [-seed 1253] \n"
   "           [-top | -notop] [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
   "           [-matrix Matrix | -nomatrix] [-nj | -bionj]\n"
-  "           [-nt] [-gtr] [-gtrrates ac ag at cg ct gt] [-gtrfreq fA fC fG fT]\n"
+  "           [-wag] [-nt] [-gtr] [-gtrrates ac ag at cg ct gt] [-gtrfreq A C G T]\n"
   "           [ -constraints constraintAlignment [ -constraintWeight 100.0 ] ]\n"
   "           [-log logfile]\n"
   "         [ alignment_file ]\n"
@@ -376,18 +383,23 @@ char *expertUsage =
   "  By default FastTree expects protein alignments,  use -nt for nucleotides\n"
   "  FastTree reads standard input if no alignment file is given\n"
   "\n"
-  "  Use -n if you want to read multiple alignments in. This only\n"
-  "  works with phylip interleaved format. For example, you can\n"
-  "  use it with the output from phylip's seqboot. If you use -n, FastTree\n"
-  "  will write 1 tree per line to standard output. You might also\n"
-  "  want to use -quiet to eliminate status messages to standard error.\n"
-  "  If you use -n together with -intree starting_tree_file,\n"
-  "  then FastTree will also read that many trees from the file\n"
-  "  (Use -intree1 if you want to use the same starting tree each time)\n"
-  "  Note -- any branch lengths in the starting trees are ignored\n"
-  "  Use -log logfile to save intermediate trees -- you can extract\n"
-  "  the trees and restart long-running jobs if they crash\n"
-  "  -log also reports the per-site rates (1 means slowest category)\n"
+  "Input/output options:\n"
+  "  -n -- read in multiple alignments in. This only\n"
+  "    works with phylip interleaved format. For example, you can\n"
+  "    use it with the output from phylip's seqboot. If you use -n, FastTree\n"
+  "    will write 1 tree per line to standard output.\n"
+  "  -intree newickfile -- read the starting tree in from newickfile.\n"
+  "     Any branch lengths in the starting trees are ignored.\n"
+  "    -intree with -n will read a separate starting tree for each alignment.\n"
+  "  -intree1 newickfile -- read the same starting tree for each alignment\n"
+  "  -quiet -- do not write to standard error during normal operation (no progress\n"
+  "     indicator, no options summary, no likelihood values, etc.)\n"
+  "  -nopr -- do not write the progress indicator to stderr\n"
+  "  -log logfile -- save intermediate trees so you can extract\n"
+  "    the trees and restart long-running jobs if they crash\n"
+  "    -log also reports the per-site rates (1 means slowest category)\n"
+  "  -quote -- quote sequence names in the output and allow spaces, commas,\n"
+  "    parentheses, and colons in them but not ' characters (fasta files only)\n"
   "\n"
   "Distances:\n"
   "  Default: For protein sequences, log-corrected distances and an\n"
@@ -422,6 +434,7 @@ char *expertUsage =
   "       ML and ME NNIs)\n"
   "\n"
   "Maximum likelihood model options:\n"
+  "  -wag -- Whelan-And-Goldman 2001 model instead of (default) Jones-Taylor-Thorton 1992 model (a.a. only)\n"
   "  -gtr -- generalized time-reversible instead of (default) Jukes-Cantor (nt only)\n"
   "  -cat # -- specify the number of rate categories of sites (default 20)\n"
   "  -nocat -- no CAT model (just 1 category)\n"
@@ -858,7 +871,7 @@ distance_matrix_t *ReadDistanceMatrix(char *prefix);
 void SetupDistanceMatrix(/*IN/OUT*/distance_matrix_t *); /* set eigentot, codeFreq, gapFreq */
 void ReadMatrix(char *filename, /*OUT*/float codes[MAXCODES][MAXCODES], bool check_codes);
 void ReadVector(char *filename, /*OUT*/float codes[MAXCODES]);
-alignment_t *ReadAlignment(/*READ*/FILE *fp); /* Returns a list of strings (exits on failure) */
+alignment_t *ReadAlignment(/*READ*/FILE *fp, bool bQuote); /* Returns a list of strings (exits on failure) */
 alignment_t *FreeAlignment(alignment_t *); /* returns NULL */
 void FreeAlignmentSeqs(/*IN/OUT*/alignment_t *);
 
@@ -1405,7 +1418,7 @@ float *ExpEigenRates(double length, transition_matrix_t *transmat, rates_t *rate
 /* Print a progress report if more than 0.1 second has gone by since the progress report */
 /* Format should include 0-4 %d references and no newlines */
 void ProgressReport(char *format, int iArg1, int iArg2, int iArg3, int iArg4);
-void LogTree(char *format, int round, /*OPTIONAL WRITE*/FILE *fp, NJ_t *NJ, char **names, uniquify_t *unique);
+void LogTree(char *format, int round, /*OPTIONAL WRITE*/FILE *fp, NJ_t *NJ, char **names, uniquify_t *unique, bool bQuote);
 void LogMLRates(/*OPTIONAL WRITE*/FILE *fpLog, NJ_t *NJ);
 
 void *mymalloc(size_t sz);       /* Prints "Out of memory" and exits on failure */
@@ -1481,7 +1494,7 @@ char *GetHashString(hashstrings_t *hash, hashiterator_t hi);
 int HashCount(hashstrings_t *hash, hashiterator_t hi);
 int HashFirst(hashstrings_t *hash, hashiterator_t hi);
 
-void PrintNJ(/*WRITE*/FILE *, NJ_t *NJ, char **names, uniquify_t *unique, bool bShowSupport);
+void PrintNJ(/*WRITE*/FILE *, NJ_t *NJ, char **names, uniquify_t *unique, bool bShowSupport, bool bQuoteNames);
 
 /* Print topology using node indices as node names */
 void PrintNJInternal(/*WRITE*/FILE *, NJ_t *NJ, bool useLen);
@@ -1572,6 +1585,11 @@ distance_matrix_t matrixBLOSUM45;
 double matrixJTT92[MAXCODES][MAXCODES];
 double statJTT92[MAXCODES];
 
+/* The WAG amino acid transition matrix (Whelan-And-Goldman 2001) */
+double matrixWAG01[MAXCODES][MAXCODES];
+double statWAG01[MAXCODES];
+
+
 int main(int argc, char **argv) {
   int nAlign = 1; /* number of alignments to read */
   int iArg;
@@ -1590,10 +1608,12 @@ int main(int argc, char **argv) {
   int nRateCats = nDefaultRateCats;
   char *logfile = NULL;
   bool bUseGtr = false;
+  bool bUseWag = false;
   bool bUseGtrRates = false;
   double gtrrates[6] = {1,1,1,1,1,1};
   bool bUseGtrFreq = false;
   double gtrfreq[4] = {0.25,0.25,0.25,0.25};
+  bool bQuote = false;
 
   if (isatty(STDIN_FILENO) && argc == 1) {
     fprintf(stderr,"Usage for FastTree version %s %s%s:\n%s",
@@ -1638,6 +1658,8 @@ int main(int argc, char **argv) {
 	fprintf(stderr, "-n argument for #input alignments must be > 0 not %s\n", argv[iArg]);
 	exit(1);
       }
+    } else if (strcmp(argv[iArg], "-quote") == 0) {
+      bQuote = true;
     } else if (strcmp(argv[iArg], "-nt") == 0) {
       nCodes = 4;
     } else if (strcmp(argv[iArg], "-intree") == 0 && iArg < argc-1) {
@@ -1760,6 +1782,8 @@ int main(int argc, char **argv) {
       }
     } else if (strcmp(argv[iArg],"-nocat") == 0) {
       nRateCats = 1;
+    } else if (strcmp(argv[iArg], "-wag") == 0) {
+        bUseWag = true;
     } else if (strcmp(argv[iArg], "-gtr") == 0) {
       bUseGtr = true;
     } else if (strcmp(argv[iArg], "-gtrrates") == 0 && iArg < argc-6) {
@@ -1901,7 +1925,7 @@ int main(int argc, char **argv) {
       
       if (MLnni != 0 || MLlen) {
 	fprintf(fp, "ML Model: %s,",
-		(nCodes == 4) ? (bUseGtr ? "Generalized Time-Reversible" : "Jukes-Cantor") : "Jones-Taylor-Thorton");
+		(nCodes == 4) ? (bUseGtr ? "Generalized Time-Reversible" : "Jukes-Cantor") : (bUseWag ? "Whelan-And-Goldman" : "Jones-Taylor-Thorton"));
 	if (nRateCats == 1)
 	  fprintf(fp, " No rate variation across sites");
 	else
@@ -1960,7 +1984,7 @@ int main(int argc, char **argv) {
   }
 
   for(iAln = 0; iAln < nAlign; iAln++) {
-    alignment_t *aln = ReadAlignment(fpIn);
+    alignment_t *aln = ReadAlignment(fpIn, bQuote);
     if (aln->nSeq < 1) {
       fprintf(stderr, "No alignment sequences\n");
       exit(1);
@@ -2036,7 +2060,7 @@ int main(int argc, char **argv) {
       alignment_t *constraints = NULL;
       char **uniqConstraints = NULL;
       if (constraintsFile != NULL) {
-	constraints = ReadAlignment(fpConstraints);
+	constraints = ReadAlignment(fpConstraints, bQuote);
 	if (constraints->nSeq < 4) {
 	  fprintf(stderr, "Warning: constraints file with less than 4 sequences ignored:\nalignment #%d in %s\n",
 		  iAln+1, constraintsFile);
@@ -2048,10 +2072,11 @@ int main(int argc, char **argv) {
       }	/* end load constraints */
 
       transition_matrix_t *transmat = NULL;
-      if (nCodes == 20)
-	transmat = CreateTransitionMatrix(matrixJTT92,statJTT92);
-      else if (nCodes == 4 && bUseGtr && (bUseGtrRates || bUseGtrFreq))
+      if (nCodes == 20) {
+	transmat = bUseWag? CreateTransitionMatrix(matrixWAG01,statWAG01) : CreateTransitionMatrix(matrixJTT92,statJTT92);
+      } else if (nCodes == 4 && bUseGtr && (bUseGtrRates || bUseGtrFreq)) {
 	transmat = CreateGTR(gtrrates,gtrfreq);
+      }
       NJ_t *NJ = InitNJ(unique->uniqueSeq, unique->nUnique, aln->nPos,
 			uniqConstraints,
 			uniqConstraints != NULL ? constraints->nPos : 0, /* nConstraints */
@@ -2068,11 +2093,11 @@ int main(int argc, char **argv) {
 	if (verbose > 2)
 	  fprintf(stderr, "Read tree from %s\n", intreeFile);
 	if (verbose > 2)
-	  PrintNJ(stderr, NJ, aln->names, unique, /*support*/false);
+	  PrintNJ(stderr, NJ, aln->names, unique, /*support*/false, bQuote);
       } else {
 	FastNJ(NJ);
       }
-      LogTree("NJ", 0, fpLog, NJ, aln->names, unique);
+      LogTree("NJ", 0, fpLog, NJ, aln->names, unique, bQuote);
 
       /* profile-frequencies for the "up-profiles" in ReliabilityNJ take only diameter(Tree)*L*a
 	 space not N*L*a space, because we can free them as we go.
@@ -2101,7 +2126,7 @@ int main(int argc, char **argv) {
 	  double maxDelta;
 	  if (!bConverged) {
 	    int nChange = NNI(/*IN/OUT*/NJ, i, nniToDo, /*use ml*/false, /*IN/OUT*/nni_stats, /*OUT*/&maxDelta);
-	    LogTree("ME_NNI%d",i+1, fpLog, NJ, aln->names, unique);
+	    LogTree("ME_NNI%d",i+1, fpLog, NJ, aln->names, unique, bQuote);
 	    if (nChange == 0) {
 	      bConverged = true;
 	      if (verbose>1)
@@ -2114,7 +2139,7 @@ int main(int argc, char **argv) {
 	  /* Interleave SPRs with NNIs (typically 1/3rd NNI, SPR, 1/3rd NNI, SPR, 1/3rd NNI */
 	  if (sprRemaining > 0 && (nniToDo/(spr+1) > 0 && ((i+1) % (nniToDo/(spr+1))) == 0)) {
 	    SPR(/*IN/OUT*/NJ, maxSPRLength, spr-sprRemaining, spr);
-	    LogTree("ME_SPR%d",spr-sprRemaining+1, fpLog, NJ, aln->names, unique);
+	    LogTree("ME_SPR%d",spr-sprRemaining+1, fpLog, NJ, aln->names, unique, bQuote);
 	    sprRemaining--;
 	    /* Restart the NNIs -- set all ages to 0, etc. */
 	    bConverged = false;
@@ -2126,7 +2151,7 @@ int main(int argc, char **argv) {
       }
       while(sprRemaining > 0) {	/* do any remaining SPR rounds */
 	SPR(/*IN/OUT*/NJ, maxSPRLength, spr-sprRemaining, spr);
-	LogTree("ME_SPR%d",spr-sprRemaining+1, fpLog, NJ, aln->names, unique);
+	LogTree("ME_SPR%d",spr-sprRemaining+1, fpLog, NJ, aln->names, unique, bQuote);
 	sprRemaining--;
       }
 
@@ -2137,7 +2162,7 @@ int main(int argc, char **argv) {
 	 to get estimates of starting distances for quartets, etc.
 	*/
       UpdateBranchLengths(/*IN/OUT*/NJ);
-      LogTree("ME_Lengths",0, fpLog, NJ, aln->names, unique);
+      LogTree("ME_Lengths",0, fpLog, NJ, aln->names, unique, bQuote);
 
       if(verbose>0 || fpLog) {
 	double total_len = 0;
@@ -2186,7 +2211,7 @@ int main(int argc, char **argv) {
 	    for (node = 0; node < NJ->maxnode; node++)
 	      oldlength[node] = NJ->branchlength[node];
 	    OptimizeAllBranchLengths(/*IN/OUT*/NJ);
-	    LogTree("ML_Lengths",iRound, fpLog, NJ, aln->names, unique);
+	    LogTree("ML_Lengths",iRound, fpLog, NJ, aln->names, unique, bQuote);
 	    double dMaxChange = 0; /* biggest change in branch length */
 	    for (node = 0; node < NJ->maxnode; node++) {
 	      double d = fabs(oldlength[node] - NJ->branchlength[node]);
@@ -2221,7 +2246,7 @@ int main(int argc, char **argv) {
 	if (MLnniToDo > 0) {
 	  /* This may help us converge faster, and is fast */
 	  OptimizeAllBranchLengths(/*IN/OUT*/NJ);
-	  LogTree("ML_Lengths%d",1, fpLog, NJ, aln->names, unique);
+	  LogTree("ML_Lengths%d",1, fpLog, NJ, aln->names, unique, bQuote);
 	}
 
 	int iMLnni;
@@ -2229,7 +2254,7 @@ int main(int argc, char **argv) {
 	bool bConverged = false;
 	for (iMLnni = 0; iMLnni < MLnniToDo; iMLnni++) {
 	  int changes = NNI(/*IN/OUT*/NJ, iMLnni, MLnniToDo, /*use ml*/true, /*IN/OUT*/nni_stats, /*OUT*/&maxDelta);
-	  LogTree("ML_NNI%d",iMLnni+1, fpLog, NJ, aln->names, unique);
+	  LogTree("ML_NNI%d",iMLnni+1, fpLog, NJ, aln->names, unique, bQuote);
 	  double loglk = TreeLogLk(NJ, /*site_likelihoods*/NULL);
 	  bool bConvergedHere = (iMLnni > 0) && ((loglk < lastloglk + treeLogLkDelta) || maxDelta < treeLogLkDelta);
 	  if (verbose)
@@ -2268,7 +2293,7 @@ int main(int argc, char **argv) {
 	/* This does not take long and improves the results */
 	if (MLnniToDo > 0) {
 	  OptimizeAllBranchLengths(/*IN/OUT*/NJ);
-	  LogTree("ML_Lengths%d",2, fpLog, NJ, aln->names, unique);
+	  LogTree("ML_Lengths%d",2, fpLog, NJ, aln->names, unique, bQuote);
 	  if (verbose || fpLog) {
 	    double loglk = TreeLogLk(NJ, /*site_likelihoods*/NULL);
 	    if (verbose)
@@ -2358,7 +2383,7 @@ int main(int argc, char **argv) {
 #endif
 	fflush(fp);
       }
-      PrintNJ(stdout, NJ, aln->names, unique, /*support*/nBootstrap > 0);
+      PrintNJ(stdout, NJ, aln->names, unique, /*support*/nBootstrap > 0, bQuote);
       fflush(stdout);
       if (fpLog) {
 	fprintf(fpLog,"TreeCompleted\n");
@@ -2428,11 +2453,11 @@ void LogMLRates(/*OPTIONAL WRITE*/FILE *fpLog, NJ_t *NJ) {
   }
 }
 
-void LogTree(char *format, int i, /*OPTIONAL WRITE*/FILE *fpLog, NJ_t *NJ, char **names, uniquify_t *unique) {
+void LogTree(char *format, int i, /*OPTIONAL WRITE*/FILE *fpLog, NJ_t *NJ, char **names, uniquify_t *unique, bool bQuote) {
   if(fpLog != NULL) {
     fprintf(fpLog, format, i);
     fprintf(fpLog, "\t");
-    PrintNJ(fpLog, NJ, names, unique, /*support*/false);
+    PrintNJ(fpLog, NJ, names, unique, /*support*/false, bQuote);
     fflush(fpLog);
   }
 }
@@ -3436,7 +3461,7 @@ void PrintNJInternal(FILE *fp, NJ_t *NJ, bool useLen) {
   stack = myfree(stack, sizeof(stack_t)*NJ->maxnodes);
 }
 
-void PrintNJ(FILE *fp, NJ_t *NJ, char **names, uniquify_t *unique, bool bShowSupport) {
+void PrintNJ(FILE *fp, NJ_t *NJ, char **names, uniquify_t *unique, bool bShowSupport, bool bQuote) {
   /* And print the tree: depth first search
    * The stack contains
    * list of remaining children with their depth
@@ -3446,11 +3471,11 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names, uniquify_t *unique, bool bShowSup
     /* Special case -- otherwise we end up with double parens */
     int first = unique->uniqueFirst[0];
     assert(first >= 0 && first < unique->nSeq);
-    fprintf(fp,"(%s:0.0",names[first]);
+    fprintf(fp, bQuote ? "('%s':0.0" : "(%s:0.0", names[first]);
     int iName = unique->alnNext[first];
     while (iName >= 0) {
       assert(iName < unique->nSeq);
-      fprintf(fp,",%s:0.0",names[iName]);
+      fprintf(fp, bQuote ? ",'%s':0.0" : ",%s:0.0", names[iName]);
       iName = unique->alnNext[iName];
     }
     fprintf(fp,");\n");
@@ -3476,13 +3501,13 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names, uniquify_t *unique, bool bShowSup
       assert(first >= 0 && first < unique->nSeq);
       /* Print the name, or the subtree of duplicate names */
       if (unique->alnNext[first] == -1) {
-	fprintf(fp, "%s", names[first]);
+	fprintf(fp, bQuote ? "'%s'" : "%s", names[first]);
       } else {
-	fprintf(fp,"(%s:0.0",names[first]);
+	fprintf(fp, bQuote ? "('%s':0.0" : "(%s:0.0", names[first]);
 	int iName = unique->alnNext[first];
 	while (iName >= 0) {
 	  assert(iName < unique->nSeq);
-	  fprintf(fp,",%s:0.0",names[iName]);
+	  fprintf(fp, bQuote ? ",'%s':0.0" : ",%s:0.0", names[iName]);
 	  iName = unique->alnNext[iName];
 	}
 	fprintf(fp,")");
@@ -3516,7 +3541,8 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names, uniquify_t *unique, bool bShowSup
   stack = myfree(stack, sizeof(stack_t)*NJ->maxnodes);
 }
 
-alignment_t *ReadAlignment(/*IN*/FILE *fp) {
+alignment_t *ReadAlignment(/*IN*/FILE *fp, bool bQuote) {
+  /* bQuote supports the -quote option */
   int nSeq = 0;
   int nPos = 0;
   char **names = NULL;
@@ -3529,8 +3555,8 @@ alignment_t *ReadAlignment(/*IN*/FILE *fp) {
   int nSaved = 100;
   if (buf[0] == '>') {
     /* FASTA, truncate names at any of these */
-    char *nameStop = "(),: \t\r\n";
-    char *seqSkip = " \t\r\n";
+    char *nameStop = bQuote ? "'\t\r\n" : "(),: \t\r\n";
+    char *seqSkip = " \t\r\n";	/* skip these characters in the sequence */
     seqs = (char**)mymalloc(sizeof(char*) * nSaved);
     names = (char**)mymalloc(sizeof(char*) * nSaved);
 
@@ -9938,4 +9964,28 @@ double matrixJTT92[MAXCODES][MAXCODES] = {
   { 0.001275,0.017854,0.001134,0.000567,0.016295,0.002551,0.001417,0.007793,0.001134,0.001275,0.007368,0.001417,0.003401,0.00751,0.00085,0.004959,0.0017,-0.312785,0.010061,0.003542 },
   { 0.003509,0.006379,0.022328,0.014673,0.066664,0.007655,0.002233,0.002552,0.182769,0.010207,0.007655,0.002552,0.005741,0.170967,0.00319,0.020095,0.006698,0.022647,-0.605978,0.005103 },
   { 0.195438,0.011149,0.010493,0.020331,0.040662,0.013117,0.029512,0.030824,0.007214,0.630254,0.11805,0.009182,0.211834,0.040662,0.015084,0.024922,0.073453,0.016396,0.010493,-1.241722 }
+};
+
+double statWAG01[MAXCODES] = {0.0866279,0.043972, 0.0390894,0.0570451,0.0193078,0.0367281,0.0580589,0.0832518,0.0244314,0.048466, 0.086209, 0.0620286,0.0195027,0.0384319,0.0457631,0.0695179,0.0610127,0.0143859,0.0352742,0.0708956};
+double matrixWAG01[MAXCODES][MAXCODES] = {
+	{-1.117151, 0.050147, 0.046354, 0.067188, 0.093376, 0.082607, 0.143908, 0.128804, 0.028817, 0.017577, 0.036177, 0.082395, 0.081234, 0.019138, 0.130789, 0.306463, 0.192846, 0.010286, 0.021887, 0.182381},
+	{0.025455, -0.974318, 0.029321, 0.006798, 0.024376, 0.140086, 0.020267, 0.026982, 0.098628, 0.008629, 0.022967, 0.246964, 0.031527, 0.004740, 0.031358, 0.056495, 0.025586, 0.053714, 0.017607, 0.011623},
+	{0.020916, 0.026065, -1.452438, 0.222741, 0.010882, 0.063328, 0.038859, 0.046176, 0.162306, 0.022737, 0.005396, 0.123567, 0.008132, 0.003945, 0.008003, 0.163042, 0.083283, 0.002950, 0.044553, 0.008051},
+	{0.044244, 0.008819, 0.325058, -0.989665, 0.001814, 0.036927, 0.369645, 0.051822, 0.055719, 0.002361, 0.005077, 0.028729, 0.006212, 0.002798, 0.025384, 0.064166, 0.022443, 0.007769, 0.019500, 0.009120},
+	{0.020812, 0.010703, 0.005375, 0.000614, -0.487357, 0.002002, 0.000433, 0.006214, 0.005045, 0.003448, 0.007787, 0.001500, 0.007913, 0.008065, 0.002217, 0.028525, 0.010395, 0.014531, 0.011020, 0.020307},
+	{0.035023, 0.117008, 0.059502, 0.023775, 0.003809, -1.379785, 0.210830, 0.012722, 0.165524, 0.004391, 0.033516, 0.150135, 0.059565, 0.003852, 0.035978, 0.039660, 0.033070, 0.008316, 0.008777, 0.011613},
+	{0.096449, 0.026759, 0.057716, 0.376214, 0.001301, 0.333275, -1.236894, 0.034593, 0.034734, 0.007763, 0.009400, 0.157479, 0.019202, 0.004944, 0.041578, 0.042955, 0.050134, 0.009540, 0.011961, 0.035874},
+	{0.123784, 0.051085, 0.098345, 0.075630, 0.026795, 0.028838, 0.049604, -0.497615, 0.021792, 0.002661, 0.005356, 0.032639, 0.015212, 0.004363, 0.021282, 0.117240, 0.019732, 0.029444, 0.009052, 0.016361},
+	{0.008127, 0.054799, 0.101443, 0.023863, 0.006384, 0.110105, 0.014616, 0.006395, -0.992342, 0.003543, 0.012807, 0.022832, 0.010363, 0.017420, 0.017851, 0.018979, 0.012136, 0.006733, 0.099319, 0.003035},
+	{0.009834, 0.009511, 0.028192, 0.002006, 0.008654, 0.005794, 0.006480, 0.001549, 0.007029, -1.233162, 0.161294, 0.016472, 0.216559, 0.053891, 0.005083, 0.016249, 0.074170, 0.010808, 0.021372, 0.397837},
+	{0.036002, 0.045028, 0.011900, 0.007673, 0.034769, 0.078669, 0.013957, 0.005547, 0.045190, 0.286902, -0.726011, 0.023303, 0.439180, 0.191376, 0.037625, 0.031191, 0.029552, 0.060196, 0.036066, 0.162890},
+	{0.058998, 0.348377, 0.196082, 0.031239, 0.004820, 0.253558, 0.168246, 0.024319, 0.057967, 0.021081, 0.016767, -1.124580, 0.060821, 0.005783, 0.036254, 0.062960, 0.090292, 0.008952, 0.008675, 0.019884},
+	{0.018288, 0.013983, 0.004057, 0.002124, 0.007993, 0.031629, 0.006450, 0.003564, 0.008272, 0.087143, 0.099354, 0.019123, -1.322098, 0.024370, 0.003507, 0.010109, 0.031033, 0.010556, 0.008769, 0.042133},
+	{0.008490, 0.004143, 0.003879, 0.001885, 0.016054, 0.004030, 0.003273, 0.002014, 0.027402, 0.042734, 0.085315, 0.003583, 0.048024, -0.713669, 0.006512, 0.022020, 0.006934, 0.061698, 0.260332, 0.026213},
+	{0.069092, 0.032635, 0.009370, 0.020364, 0.005255, 0.044829, 0.032773, 0.011698, 0.033438, 0.004799, 0.019973, 0.026747, 0.008229, 0.007754, -0.605590, 0.077484, 0.038202, 0.006695, 0.010376, 0.015124},
+	{0.245933, 0.089317, 0.289960, 0.078196, 0.102703, 0.075066, 0.051432, 0.097899, 0.054003, 0.023306, 0.025152, 0.070562, 0.036035, 0.039831, 0.117705, -1.392239, 0.319421, 0.038212, 0.057419, 0.016981},
+	{0.135823, 0.035501, 0.129992, 0.024004, 0.032848, 0.054936, 0.052685, 0.014461, 0.030308, 0.093371, 0.020915, 0.088814, 0.097083, 0.011008, 0.050931, 0.280341, -1.154973, 0.007099, 0.018643, 0.088894},
+	{0.001708, 0.017573, 0.001086, 0.001959, 0.010826, 0.003257, 0.002364, 0.005088, 0.003964, 0.003208, 0.010045, 0.002076, 0.007786, 0.023095, 0.002105, 0.007908, 0.001674, -0.466694, 0.037525, 0.005516},
+	{0.008912, 0.014125, 0.040205, 0.012058, 0.020133, 0.008430, 0.007267, 0.003836, 0.143398, 0.015555, 0.014757, 0.004934, 0.015861, 0.238943, 0.007998, 0.029135, 0.010779, 0.092011, -0.726275, 0.011652},
+	{0.149259, 0.018739, 0.014602, 0.011335, 0.074565, 0.022417, 0.043805, 0.013932, 0.008807, 0.581952, 0.133956, 0.022726, 0.153161, 0.048356, 0.023429, 0.017317, 0.103293, 0.027186, 0.023418, -1.085487},
 };
