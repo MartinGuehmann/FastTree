@@ -1,6 +1,6 @@
 /*
  * FastTree -- neighbor joining for multiple sequence alignments using profiles
- * Morgan N. Price, January-September 2008
+ * Morgan N. Price, January-October 2008
  *
  *  Copyright (C) 2008 The Regents of the University of California
  *  All rights reserved.
@@ -43,13 +43,19 @@
  * support values for each split from the profiles of the 4 nodes
  * around the split. It stores a profile for each node and a average
  * profile over all active nodes (the "out-profile" for computing the
- * total sum of distance to other nodes).  Requires O(N*L*a) space,
- * where N is the number of sequences, L is the alignment width, and a
- * is the alphabet size
+ * total sum of distance to other nodes).  The neighbor joining phase
+ * requires O(N*L*a) space, where N is the number of sequences, L is
+ * the alignment width, and a is the alphabet size. The top-hits
+ * heuristic requires an additional O(N sqrt(N)) memory. After
+ * neighbor-joining, FastTree improves the topology with
+ * nearest-neighbor interchanges (NNIs), which does not have a
+ * significant additional memory requirement.
  *
- * FastTree operates only on "additive" distances -- either %different
- * or by using an amino acid similarity matrix (-matrix option) If we
- * are using %different as our distance matrix then
+ * Although FastTree uses an after-the-fact log correction during the
+ * NNIs, the operations on profiles require "additive" distances --
+ * either %different or by using an amino acid similarity matrix
+ * (-matrix option) If we are using %different as our distance matrix
+ * then
  *
  * Profile_distance(A,B) = 1 - sum over characters of freq(A)*freq(B)
  *
@@ -209,10 +215,13 @@
 #include <stdlib.h>
 #include <time.h>
 #include <ctype.h>
+#ifdef TRACK_MEMORY
+/* malloc.h apparently doesn't exist on MacOS */
 #include <malloc.h>
+#endif
 
 char *usage =
-  "Usage for FastTree 1.0.0:\n"
+  "Usage for FastTree 1.0.1:\n"
   "FastTree [-quiet] [-boot 1000] [-seed 1253] [-nni 10] [-slow | -fastest]\n"
   "          [-top | -notop] [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
   "          [-matrix Matrix | -nomatrix] [-nj | -bionj]\n"
@@ -234,9 +243,12 @@ char *usage =
   "  want to use -quiet to eliminate status messages to standard error.\n"
   "\n"
   "Distances:\n"
-  "  By default, FastTree uses the BLOSUM45 matrix for protein sequences\n"
-  "  and fraction-different as a distance for nucleotides\n"
+  "  Default: For protein sequences, log-corrected distances and an\n"
+  "     amino acid dissimilarity matrix derived from BLOSUM45\n"
+  "  or for nucleotide sequences, Jukes-Cantor distances\n"
   "  To specify a different matrix, use -matrix FilePrefix or -nomatrix\n"
+  "  Use -rawdist to turn the log-correction off\n"
+  "  or to use %different instead of Jukes-Cantor\n"
   "\n"
   "Nearest-neighbor interchanges:\n"
   "  By default, FastTree tries to improve the tree by doing log2(N)+1\n"
@@ -256,7 +268,8 @@ char *usage =
   "Searching for the best join:\n"
   "  By default, FastTree combines the 'visible set' of fast neighbor-joining with\n"
   "      local hill-climbing as in relaxed neighbor-joining\n"
-  "  -slow -- exhaustive search (standard NJ or BIONJ, but different gap handling)\n"
+  "  -slow -- exhaustive search (like NJ or BIONJ, but different gap handling)\n"
+  "      -slow takes half an hour instead of 8 seconds for 1,250 proteins\n"
   "  -fastest -- search the visible set (the top hit for each node) only\n"
   "      Unlike the original fast neighbor-joining, -fastest updates visible(C)\n"
   "      after joining A and B if join(AB,C) is better than join(C,visible(C))\n"
@@ -278,6 +291,7 @@ char *usage =
   "\n"
   "Join options:\n"
   "  -bionj: weighted joins as in BIONJ (default)\n"
+  "          FastTree will also weight joins during NNIs\n"
   "  -nj: regular (unweighted) neighbor-joining\n"
   "\n";
 
@@ -403,8 +417,9 @@ double staleOutLimit = 0.02;	/* nActive changes by at most this amount before we
 int nRecomputeOutProfile = 200;	/* Recompute out-profile every this many joins (avoid roundoff) */
 int nBootstrap = 1000;		/* If set, number of replicates of local bootstrap to do */
 int nCodes=20;			/* 20 if protein, 4 if nucleotide */
-bool useMatrix=true;
-bool logdist = true;
+bool useMatrix=true;		/* If false, use %different as the uncorrected distance */
+bool logdist = true;		/* If true, do a log-correction (scoredist-like or Jukes-Cantor)
+				   but only during NNIs and support values, not during neighbor-joining */
 
 /* Performance and memory usage */
 long profileOps = 0;		/* Full profile-based distance operations */
@@ -842,7 +857,8 @@ int main(int argc, char **argv) {
       fprintf(stderr, " (%d alignments)", nAlign);
     fprintf(stderr,"\n%s distances: %s Method: %s Support: %s\nSearch: %s %s TopHits: %s\n",
 	    nCodes == 20 ? "Amino acid" : "Nucleotide",
-	    matrixPrefix ? matrixPrefix : (useMatrix? "BLOSUM45 (default)" : "%different"),
+	    matrixPrefix ? matrixPrefix : (useMatrix? "BLOSUM45 (default)"
+					   : (nCodes==4 && logdist ? "Jukes-Cantor" : "%different")),
 	    bionj ? "BIONJ" : "neighbor-joining" ,
 	    supportString,
 	    slow?"Exhaustive (slow)" : (fastest ? "Fastest" : "Normal (fast/relax)"),
@@ -989,8 +1005,15 @@ int main(int argc, char **argv) {
       }
 
       if (nBootstrap > 0) {
-	if(verbose>0) fprintf(stderr, "Topology done after %.2f sec -- computing support values\n",
-			      (clock()-clock_start)/(double)CLOCKS_PER_SEC);
+	if(verbose>0) {
+	  double total_len = 0;
+	  int iNode;
+	  for (iNode = 0; iNode < NJ->maxnode; iNode++)
+	    total_len += fabs(NJ->branchlength[iNode]);
+	  fprintf(stderr, "Total branch-length %.3f after %.2f sec -- computing support values\n",
+		  total_len,
+		  (clock()-clock_start)/(double)CLOCKS_PER_SEC);
+	}
 	fflush(stderr);
 	ReliabilityNJ(NJ);
       }
