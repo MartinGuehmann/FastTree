@@ -1,6 +1,6 @@
 /*
- * FastTree -- inferring minimum-evolution trees from multiple sequence alignments
- * by using profiles.
+ * FastTree -- inferring approximately-maximum-likelihood trees for large
+ * multiple sequence alignments.
  *
  * Morgan N. Price, 2008-2009
  * http://www.microbesonline.org/fasttree/
@@ -51,14 +51,26 @@
  * the alignment width, and a is the alphabet size. The top-hits
  * heuristic requires an additional O(N sqrt(N)) memory. After
  * neighbor-joining, FastTree improves the topology with
- * nearest-neighbor interchanges (NNIs), which does not have a
- * significant additional memory requirement.
+ * nearest-neighbor interchanges (NNIs) and subtree-prune-regraft
+ * moves (SPRs), which does not have a significant additional memory
+ * requirement. (We need only store "up-profiles" on the path from our
+ * current traversal point to the root.) These take O(NLa) time per
+ * round, and with default settings, O(N log(N) L a) time total.
+ * FastTree further improves the topology with maximum-likelihood
+ * NNIs, using similar data structures and complexity, but with a
+ * higher constant factor, and now the "profiles" are actually
+ * posterior distributions for that subtree.  Finally, FastTree uses
+ * the local bootstrap and the minimum evolution criterion to estimate
+ * the reliability of each split.
  *
- * Although FastTree uses an after-the-fact log correction during the
- * NNIs, the operations on profiles require "additive" distances --
- * either %different or by using an amino acid similarity matrix
- * (-matrix option) If we are using %different as our distance matrix
- * then
+ * Overview of the neighbor-joining phase:
+ *
+ * Although FastTree uses a log correction on profile distances to
+ * account for multiple substitutions when doing NNIs and SPRs, the
+ * operations on the profiles themselves involve "additive" distances
+ * -- either %different (for nucleotide) or by using an amino acid
+ * similarity matrix (for proteins).  If we are using %different as
+ * our distance matrix then
  *
  * Profile_distance(A,B) = 1 - sum over characters of freq(A)*freq(B)
  *
@@ -88,8 +100,8 @@
  * The "visible" set stores, for each node, the best join for that
  * node, as identified at some point in the past
  *
- * If top-hits are not being used, then the method can be summarized
- * as:
+ * If top-hits are not being used, then the neighbor-joining phase can
+ * be summarized as:
  *
  * Compute the out-profile by averaging the leaves
  * Compute the out-distance of each leaf quickly, using the out-profile
@@ -100,8 +112,8 @@
  *      as out-distances and #active nodes may have changed)
  *   Follow a chain of best hits (again recomputing the criterion)
  *  	until we find a locally best join, as in relaxed neighbor joining
- *   Create a profile of the parent node, either using simple averages
- *	or using weighted joining as in BIONJ
+ *   Create a profile of the parent node, either using simple averages (default)
+ *	or using weighted joining as in BIONJ (if -bionj was specified)
  *   Update the out-profile and the out-distances
  *   Update the visible set:
  *      find the best join for the new joined node
@@ -230,7 +242,7 @@
 #endif
 
 char *usage =
-  "Usage for FastTree version 1.1.0:\n"
+  "Usage for FastTree version 1.9.0:\n"
   "  FastTree protein_alignment > tree\n"
   "  FastTree -nt nucleotide_alignment > tree\n"
   "  FastTree -nt < nucleotide_alignment > tree\n"
@@ -238,19 +250,25 @@ char *usage =
   "\n"
   "Common options (must be before the alignment file):\n"
   "  -quiet to suppress most reporting information\n"
-  "  -pseudo to use pseudocounts (useful for highly gapped sequences)\n"
-  "  -constraints constraintAlignment to constrain the topology search\n"
-  "       constraintAlignment should have 1s or 0s to indicates splits\n"
-  "  -noboot to not compute the 'local bootstrap'\n"
   "  -n <number> if the input has multiple alignments (phylip format only)\n"
+  "  -pseudo to use pseudocounts (recommended for highly gapped sequences)\n"
   "  -intree newick_file to set the starting tree(s)\n"
   "  -intree1 newick_file to use this starting tree for all the alignments\n"
+  "        (for faster global bootstrap on huge alignments)\n"
+  "  -noboot to not compute the 'local bootstrap'\n"
+  "  -noml to turn off maximum-likelihhod NNIs\n"
+  "  -exactml to turn off approximations to posterior distributions (a.a. only)\n"
+  "  -nome to turn off minimum-evolution NNIs and SPRs\n"
+  "        (recommended if running additional ML NNIs with -intree)\n"
+  "  -constraints constraintAlignment to constrain the topology search\n"
+  "       constraintAlignment should have 1s or 0s to indicates splits\n"
   "Use FastTree -expert to see detailed documentation and more options\n";
 
 char *expertUsage =
   "FastTree [ -nt] [-n 100] [-pseudo | -pseudo 1.0]  [-boot 1000] [-quiet]\n"
   "           [-intree starting_trees_file | -intree1 starting_tree_file]\n"
-  "           [-nni 10] [-spr 2] [-slow | -fastest] [-seed 1253] \n"
+  "           [-nni 10] [-spr 2] [-noml | -mlnni 10] [-exactml] [-mlacc 2]\n"
+  "           [-slow | -fastest] [-seed 1253] \n"
   "           [-top | -notop] [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
   "           [-matrix Matrix | -nomatrix] [-nj | -bionj]\n"
   "           [-nt] \n"
@@ -275,6 +293,7 @@ char *expertUsage =
   "  If you use -n together with -intree starting_tree_file,\n"
   "  then FastTree will also read that many trees from the file\n"
   "  (Use -intree1 if you want to use the same starting tree each time)\n"
+  "  Note -- any branch lengths in the starting trees are ignored\n"
   "\n"
   "Distances:\n"
   "  Default: For protein sequences, log-corrected distances and an\n"
@@ -289,15 +308,21 @@ char *expertUsage =
   "      if analyzing the alignment has sequences with little or no overlap.\n"
   "      If the weight is not specified, it is 1.0\n"
   "\n"
-  "Topology search:\n"
+  "Topology refinement:\n"
   "  By default, FastTree tries to improve the tree by doing 2*log2(N)\n"
-  "  rounds of nearest-neighbor interchanges (NNI), where N is the number of\n"
-  "  unique sequences, and 2 rounds of subtree-prune-regraft (SPR) moves\n"
-  "  Use -nni to set the number of rounds of NNI and -spr to set the rounds of SPRs.\n"
-  "  -nni 0 will turn off both NNIs and SPRs\n"
-  "  If FastTree reports 'Bad splits: 0' then additional rounds of NNIs will probably\n"
-  "  have no effect.\n"
-  "  -sprlength set the maximum length of a SPR move (default 10)\n"
+  "  rounds of minimum-evolution nearest-neighbor interchanges (NNI),\n"
+  "  where N is the number of unique sequences, 2 rounds of\n"
+  "  subtree-prune-regraft (SPR) moves (also min.-evo.), and\n"
+  "  log(N) rounds of maximum-likelihood NNIs.\n"
+  "  Use -nni to set the number of rounds of min.-evo. NNIs,\n"
+  "  and -spr to set the rounds of SPRs.\n"
+  "  -noml will turn off both min-evo NNIs and SPRs (useful if refining\n"
+  "       an approximately maximum-likelihood tree with further NNIs)\n"
+  "  Use -sprlength set the maximum length of a SPR move (default 10)\n"
+  "  Use -mlnni to set the number of rounds of maximum-likelihood NNIs\n"
+  "  Use -exactml to turn off approximations during this phase\n"
+  "  Use -mlacc 2 or -mlacc 3 to always optimize all 5 branches at each NNI,\n"
+  "      and to optimize all 5 branches in 2 or 3 rounds\n"
   "\n"
   "Support value options:\n"
   "  by default, FastTree computes a local bootstrap with 1,000 resamples.\n"
@@ -316,7 +341,7 @@ char *expertUsage =
   "      Unlike the original fast neighbor-joining, -fastest updates visible(C)\n"
   "      after joining A and B if join(AB,C) is better than join(C,visible(C))\n"
   "      -fastest also updates out-distances in a very lazy way\n"
-  "      -fastest also sets the top-hits heuristic (-close) to be more aggressive\n"
+  "      -fastest also sets top-hits (-close & -refresh) to be more aggressive\n"
   "\n"
   "Top-hit heuristics:\n"
   "  by default, FastTree uses a top-hit list to speed up search\n"
@@ -434,12 +459,72 @@ typedef struct {
   float codeFreq[MAXCODES][MAXCODES];
 } distance_matrix_t;
 
+
+/* A transition matrix gives the instantaneous rate of change of frequencies
+   df/dt = M . f
+   which is solved by
+   f(t) = exp(M) . f(0)
+   and which is not a symmetric matrix because of non-uniform stationary frequencies
+   (stat).
+
+   Let S = diag(sqrt(stat)) be the correction so that
+   S**-1 M S is symmetric, and choose an eigendecomposition
+   M = V L V**-1 such that V = S*W and W is a rotation (the
+   rows and columns all sum to 1), so W**-1 = t(W)
+   
+   Then evolution by time t is given by
+
+   exp(M*t) = V exp(L*t) V**-1
+   P(A & B | t) = B . exp(M*t) . (A * stat)
+   note this is *not* the same as P(A->B | t)
+
+   and we can reduce some of the computations from O(a**2) to O(a) time,
+   where a is the alphabet size, by storing frequency vectors as
+   t(V) . f = t(W) . t(S) . f
+
+   Then
+   P(f0 & f1 | t) = f1 . exp(M*t) . f0 * (f0 . stat) = sum(r0j * r1j * exp(l_j*t))
+   where r0 and r1 are the transformed vectors
+
+   Posterior distribution of P given children f0 and f1 is given by
+   P(i | f0, f1, t0, t1) = stat * P(i->f0 | t0) * P(i->f1 | t1)
+   = P(i & f0 | t0) * P(i & f1 | t1) / stat
+   ~ (V . exp(t0*L) . r0) * (V . exp(t1*L) . r1) / stat
+
+   When normalize this posterior distribution (to sum to 1), divide by stat,
+   and transform by t(V) -- this is the "profile" of internal nodes
+
+   To eliminate the O(N**2) step of transforming by t(V), if the posterior
+   distribution of an amino acid is near 1 then we approximate it by
+   P(i) ~= (i==A) * w + nearP(i) * (1-w), where
+   w is fit so that P(i==A) is correct
+   nearP = Posterior(i | i, i, 0.1, 0.1) [0.1 is an arbitrary choice]
+   and we confirm that the approximation works well before we use it.
+
+   Given this parameter w we can set
+   rotated_posterior = rotation(w * (i==A)/stat + (1-w) * nearP/stat)
+   = codeFreq(A) * w/stat(A) + nearFreq(A) * (1-w)
+ */
+typedef struct {
+  /* Input */
+  float stat[MAXCODES]; /* The stationary distribution */
+  float eigenmat[MAXCODES][MAXCODES]; /* Eigenvectors of the transition matrix */
+  float eigeninv[MAXCODES][MAXCODES]; /* Inverse of eigenmatrix */
+  float eigenval[MAXCODES];	/* Eigenvalues  */
+  /* Below values are computed by InitTransitionMatrix() */
+  float statinv[MAXCODES];	/* 1/stat */
+  float codeFreq[NOCODE+1][MAXCODES]; /* the same as the eigenvectors, but includes a NOCODE entry for gaps */
+  float nearP[MAXCODES][MAXCODES]; /* nearP[i][j] = P(parent=j | both children are i, both lengths are 0.1 */
+  float nearFreq[MAXCODES][MAXCODES]; /* rotation of nearP/stat */
+} transition_matrix_t;
+
 typedef struct {
   /* The input */
   int nSeq;
   int nPos;
   char **seqs;			/* the aligment sequences array (not reallocated) */
   distance_matrix_t *distance_matrix; /* a pointer (not reallocated), or NULL if using %identity distance */
+  transition_matrix_t *transmat; /* a pointer (not reallocated), or NULL for Jukes-Cantor */
   /* Topological constraints are represented for each sequence as binary characters
      with values of '0', '1', or '-' (for missing data)
      Sequences that have no constraint may have a NULL string
@@ -524,6 +609,13 @@ double pseudoWeight = 0.0;      /* The weight of pseudocounts to avoid artificia
 				   consideration. The log correction takes place after the
 				   pseudocount is used. */
 double constraintWeight = 10.0; /* Cost of violation of a topological constraint in evolutionary distance */
+int mlAccuracy = 1;		/* Rounds of optimization of branch lengths; 1 means do 2nd round only if close */
+double closeLogLkLimit = 5.0;	/* If log-lk is off by this much from current choice, do not optimize further */
+double treeLogLkDelta = 0.1;	/* Give up if tree log-lk changes by less than this */
+bool exactML = false;		/* Approximate posterior distributions to eliminate O(a**2) steps for a.a.s */
+double approxMLminf = 0.95;	/* Only try to approximate posterior distributions if max. value is at least this high */
+double approxMLminratio = 2/3.0;/* Ratio of approximated/true posterior values must be at least this high */
+double approxMLnearT = 0.2;	/* 2nd component of near-constant posterior distribution uses this time scale */
 
 /* Performance and memory usage */
 long profileOps = 0;		/* Full profile-based distance operations */
@@ -536,6 +628,7 @@ long nRefreshTopHits = 0;	/* Number of full-blown searches (interior nodes) */
 long nVisibleReset = 0;		/* Number of resets of the visible set */
 long nNNI = 0;			/* Number of NNI changes performed */
 long nSPR = 0;			/* Number of SPR changes performed */
+long nML_NNI = 0;		/* Number of max-lik. NNI changes performed */
 long nSuboptimalSplits = 0;	/* # of splits that are rejected given final tree (during bootstrap) */
 long nSuboptimalConstrained = 0; /* Bad splits that are due to constraints */
 long nConstraintViolations = 0;	/* Number of constraint violations */
@@ -544,6 +637,11 @@ long nProfileFreqAvoid = 0;
 long szAllAlloc = 0;
 long mymallocUsed = 0;		/* useful allocations by mymalloc */
 long maxmallocHeap = 0;		/* Maximum of mi.arena+mi.hblkhd from mallinfo (actual mem usage) */
+long nLkCompute = 0;		/* # of likelihood computations for pairs of probability vectors */
+long nPosteriorCompute = 0;	/* # of computations of posterior probabilities */
+long nAAPosteriorExact = 0;	/* # of times compute exact AA posterior */
+long nAAPosteriorRough = 0;	/* # of times use rough approximation */
+long nStarTests = 0;		/* # of times we use star test to avoid testing an NNI */
 
 /* Protein character set */
 unsigned char *codesStringAA = (unsigned char*) "ARNDCQEGHILKMFPSTWYV";
@@ -556,22 +654,37 @@ void ReadMatrix(char *filename, /*OUT*/float codes[MAXCODES][MAXCODES], bool che
 void ReadVector(char *filename, /*OUT*/float codes[MAXCODES]);
 alignment_t *ReadAlignment(/*READ*/FILE *fp); /* Returns a list of strings (exits on failure) */
 alignment_t *FreeAlignment(alignment_t *); /* returns NULL */
+void InitTransitionMatrix(/*IN/OUT*/transition_matrix_t *transmat);
 
+/* For converting profiles from 1 rotation to another, or converts NULL to NULL */
+distance_matrix_t *TransMatToDistanceMat(transition_matrix_t *transmat);
+
+/* Allocates memory, initializes leaf profiles */
 NJ_t *InitNJ(char **sequences, int nSeqs, int nPos,
 	     /*IN OPTIONAL*/char **constraintSeqs, int nConstraints,
-	     /*IN OPTIONAL*/distance_matrix_t *); /* Allocates memory, initializes */
+	     /*IN OPTIONAL*/distance_matrix_t *,
+	     /*IN OPTIONAL*/transition_matrix_t *);
+
 NJ_t *FreeNJ(NJ_t *NJ); /* returns NULL */
 void FastNJ(/*IN/OUT*/NJ_t *NJ); /* Does the joins */
 void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ);	  /* Estimates the reliability of the joins */
 
-/* One round of nearest-neighbor interchanges */
-void NNI(/*IN/OUT*/NJ_t *NJ, int iRound, int nRounds); 
+/* One round of nearest-neighbor interchanges according to the
+   minimum-evolution or approximate maximum-likelihood criterion.
+   If doing maximum likelihood then this modifies the branch lengths.
+   age is the # of rounds since a node was NNId
+*/
+void NNI(/*IN/OUT*/NJ_t *NJ, int iRound, int nRounds, bool useML,
+	 /*OPTIONAL IN/OUT*/int *age); 
 
-/* One round of subtree-prune-regraft moves */
+/* One round of subtree-prune-regraft moves (minimum evolution) */
 void SPR(/*IN/OUT*/NJ_t *NJ, int maxSPRLength, int iRound, int nRounds);
 
-void UpdateBranchLengths(/*IN/OUT*/NJ_t *NJ); /* Recomputes all branch lengths */
-double TreeLength(/*IN/OUT*/NJ_t *NJ, bool recomputeProfiles); /*Also branch lengths*/
+/* Recomputes all branch lengths by minimum evolution criterion*/
+void UpdateBranchLengths(/*IN/OUT*/NJ_t *NJ);
+
+/* Recomputes all branch lengths and, optionally, internal profiles */
+double TreeLength(/*IN/OUT*/NJ_t *NJ, bool recomputeProfiles);
 
 typedef struct {
   int nBadSplits;
@@ -683,6 +796,14 @@ profile_t *AverageProfile(profile_t *profile1, profile_t *profile2,
 			  int nPos, int nConstraints,
 			  distance_matrix_t *distance_matrix,
 			  double weight1);
+
+/* PosteriorProfile() is like AverageProfile() but it computes posterior probabilities
+   rather than an average
+*/
+profile_t *PosteriorProfile(profile_t *profile1, profile_t *profile2,
+			    double len1, double len2,
+			    /*OPTIONAL*/transition_matrix_t *transmat,
+			    int nPos, int nConstraints);
 
 /* Set a node's profile from its children.
    Deletes the previous profile if it exists
@@ -840,7 +961,65 @@ besthit_t *UniqueBestHits(NJ_t *NJ, int iNode, besthit_t *combined, int nCombine
 nni_t ChooseNNI(profile_t *profiles[4],
 		/*OPTIONAL*/distance_matrix_t *dmat,
 		int nPos, int nConstraints,
-		/*OUT*/double criteria[3]);  /* The three potential internal branch lengths */
+		/*OUT*/double criteria[3]); /* The three potential internal branch lengths or log likelihoods*/
+
+/* length[] is ordered as described by quartet_length_t, but after we do the swap
+   of B with C (to give AC|BD) or B with D (to get AD|BC), if that is the returned choice
+   bFast means do not consider NNIs if AB|CD is noticeably better than the star topology
+   (as implemented by MLQuartetOptimize).
+   If there are constraints, then the constraint penalty is included in criteria[]
+*/
+nni_t MLQuartetNNI(profile_t *profiles[4],
+		   /*OPTIONAL*/transition_matrix_t *transmat,
+		   int nPos, int nConstraints,
+		   /*OUT*/double criteria[3], /* The three potential quartet log-likelihoods */
+		   /*IN/OUT*/float length[5],
+		   bool bFast);
+
+const double LkUnderflow = 1.0e-4;
+const double LkUnderflowInv = 1.0e4;
+const double LogLkUnderflow = 9.21034037197618;
+const double Log2 = 0.693147180559945;
+const double MLMinBranchLength = 1.0e-4;
+
+double TreeLogLk(/*IN*/NJ_t *NJ);
+double MLQuartetLogLk(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
+		      int nPos, /*OPTIONAL*/transition_matrix_t *transmat,
+		      /*IN*/double branch_lengths[5]);
+
+/* P(A & B | len) = P(B | A, len) * P(A) */
+double PairLogLk(/*IN*/profile_t *p1, /*IN*/profile_t *p2, double length,
+		 int nPos, /*OPTIONAL*/transition_matrix_t *transmat);
+
+/* Branch lengths for 4-taxon tree ((A,B),C,D); I means internal */
+typedef enum {LEN_A,LEN_B,LEN_C,LEN_D,LEN_I} quartet_length_t;
+
+typedef struct {
+  profile_t *profiles[4];	/*ABCD*/
+  int nPos;
+  transition_matrix_t *transmat;
+  double *branch_lengths;	/* 0 for A, 1 for B, 2 for C, 3 for D, 4 for internal */
+  int iOpt;			/* index of which length to optimize */
+  int nEval;			/* number of likelihood evaluations */
+  /* The pair to optimize */
+  profile_t *pair1;
+  profile_t *pair2;
+} quartet_opt_t;
+
+double PairNegLogLk(double x, void *data); /* data must be a quartet_opt_t */
+
+/* Returns the resulting log likelihood. Optionally returns whether other
+   topologies should be considered, based on the difference between AB|CD and
+   the "star topology" (AB|CD with a branch length of MLMinBranchLength) exceeding
+   closeLogLkLimit.
+   If bStartTest is passed in, it only optimized the internal branch if
+   the star test is true. Otherwise, it optimized all 5 branch lengths
+   in turn.
+ */
+double MLQuartetOptimize(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
+			 int nPos, /*OPTIONAL*/transition_matrix_t *transmat,
+			 /*IN/OUT*/double branch_lengths[5],
+			 /*OPTIONAL OUT*/bool *pStarTest);
 
 /* Returns the number of steps considered, with the actual steps in steps[]
    Modifies the tree by this chain of NNIs
@@ -860,7 +1039,7 @@ void UnwindSPRStep(/*IN/OUT*/NJ_t *NJ,
 
 
 /* Update the profile of node and its ancestor, and delete nearby out-profiles */
-void UpdateForNNI(/*IN/OUT*/NJ_t *NJ, int node, /*IN/OUT*/profile_t **upProfiles);
+void UpdateForNNI(/*IN/OUT*/NJ_t *NJ, int node, /*IN/OUT*/profile_t **upProfiles, bool useML);
 
 /* Sets NJ->parent[newchild] and replaces oldchild with newchild
    in the list of children of parent
@@ -872,14 +1051,18 @@ int CompareHitsByJ(const void *c1, const void *c2);
 
 int NGaps(NJ_t *NJ, int node);	/* only handles leaf sequences */
 
-/* node is the parent of AB, sibling of C, nephew of D
+/* node is the parent of AB, sibling of C
    node cannot be root or a leaf
+   If node is the child of root, then D is the other sibling of node,
+   and the 4th profile is D's profile.
+   Otherwise, D is the parent of node, and we use its upprofile
 */
 void SetupABCD(NJ_t *NJ, int node,
-	       /* the 4 profiles for ABCD; the last one is an outprofile */
+	       /* the 4 profiles for ABCD; the last one is an upprofile */
 	       /*OUT*/profile_t *profiles[4], 
 	       /*IN/OUT*/profile_t **upProfiles,
-	       /*OUT*/int nodeABC[3]);
+	       /*OUT*/int nodeABCD[4],
+	       bool useML);
 
 int Sibling(NJ_t *NJ, int node); /* At root, no unique sibling so returns -1 */
 void RootSiblings(NJ_t *NJ, int node, /*OUT*/int sibs[2]);
@@ -890,6 +1073,13 @@ void ProgressReport(char *format, int iArg1, int iArg2, int iArg3, int iArg4);
 
 void *mymalloc(size_t sz);       /* Prints "Out of memory" and exits on failure */
 void *myfree(void *, size_t sz); /* Always returns NULL */
+
+/* One-dimensional minimization using brent's function */
+double onedimenmin(double xmin, double xguess, double xmax, double (*f)(double,void*), void *data,
+		   double tol, double *fx, double *f2x);
+
+double brent(double ax, double bx, double cx, double (*f)(double, void *), void *data, double tol,
+	     double *foptx, double *f2optx, double fax, double fbx, double fcx);
 
 void ran_start(long seed);
 double knuth_rand();		/* Random number between 0 and 1 */
@@ -925,7 +1115,9 @@ int HashCount(hashstrings_t *hash, hashiterator_t hi);
 int HashFirst(hashstrings_t *hash, hashiterator_t hi);
 
 void PrintNJ(/*WRITE*/FILE *, NJ_t *NJ, char **names, uniquify_t *unique);
-void PrintNJInternal(/*WRITE*/FILE *, NJ_t *NJ); /* Print topology using node indices as node names */
+
+/* Print topology using node indices as node names */
+void PrintNJInternal(/*WRITE*/FILE *, NJ_t *NJ, bool useLen);
 
 uniquify_t *UniquifyAln(/*IN*/alignment_t *aln);
 uniquify_t *FreeUniquify(uniquify_t *);	/* returns NULL */
@@ -961,22 +1153,36 @@ traversal_t FreeTraversal(traversal_t, NJ_t*); /*returns NULL*/
 /* returns new node, or -1 if nothing left to do. Use root for the first call.
    Will return every node and then root.
    Uses postorder tree traversal (depth-first search going down to leaves first)
+   Keeps track of which nodes are visited, so even after an NNI that swaps a
+   visited child with an unvisited uncle, the next call will visit the
+   was-uncle-now-child. (However, after SPR moves, there is no such guarantee.)
+
+   If pUp is not NULL, then, if going "back up" through a previously visited node
+   (presumably due to an NNI), then it will return the node another time,
+   with *pUp = true.
 */
-int TraversePostorder(int lastnode, NJ_t *NJ, /*IN/OUT*/traversal_t);
+int TraversePostorder(int lastnode, NJ_t *NJ, /*IN/OUT*/traversal_t,
+		      /*OUT OPTIONAL*/bool *pUp);
 
 /* Routines to support storing up-profiles during tree traversal
    Eventually these should be smart enough to do weighted joins and
    to minimize memory usage
 */
 profile_t **UpProfiles(NJ_t *NJ);
-profile_t *GetUpProfile(/*IN/OUT*/profile_t **upProfiles, NJ_t *NJ, int node);
+profile_t *GetUpProfile(/*IN/OUT*/profile_t **upProfiles, NJ_t *NJ, int node, bool useML);
 profile_t *DeleteUpProfile(/*IN/OUT*/profile_t **upProfiles, NJ_t *NJ, int node); /* returns NULL */
 profile_t **FreeUpProfiles(profile_t **upProfiles, NJ_t *NJ); /* returns NULL */
 
 /* Recomputes the profile for a node, presumably to reflect topology changes
    If bionj is set, does a weighted join -- which requires using upProfiles
+   If useML is set, computes the posterior probability instead of averaging
  */
-void RecomputeProfile(/*IN/OUT*/NJ_t *NJ, /*IN/OUT*/profile_t **upProfiles, int node);
+void RecomputeProfile(/*IN/OUT*/NJ_t *NJ, /*IN/OUT*/profile_t **upProfiles, int node, bool useML);
+
+/* Recompute profiles going up from the leaves, using the provided distance matrix
+   and unweighted joins
+*/
+void RecomputeProfiles(/*IN/OUT*/NJ_t *NJ, /*OPTIONAL*/distance_matrix_t *dmat);
 
 /* If bionj is set, computes the weight to be given to A when computing the
    profile for the ancestor of A and B. C and D are the other profiles in the quartet
@@ -992,6 +1198,9 @@ int *FreePath(int *path, NJ_t *NJ); /* returns NULL */
 /* The default amino acid distance matrix, derived from the BLOSUM45 similarity matrix */
 distance_matrix_t matrixBLOSUM45;
 
+/* The default amino acid transition matrix (Jones Taylor Thorton 1992) */
+transition_matrix_t transmatJTT92;
+
 int main(int argc, char **argv) {
   int nAlign = 1; /* number of alignments to read */
   int iArg;
@@ -1001,9 +1210,10 @@ int main(int argc, char **argv) {
   char *constraintsFile = NULL;
   char *intreeFile = NULL;
   bool intree1 = false;		/* the same starting tree each round */
-  int nni = -1;			/* number of rounds of NNI, defaults to log2(n)+1 */
+  int nni = -1;			/* number of rounds of NNI, defaults to 2*log2(n)+1 */
   int spr = 2;			/* number of rounds of SPR */
   int maxSPRLength = 10;	/* maximum distance to move a node */
+  int MLnni = -1;		/* number of rounds of ML NNI, defaults to log2(n)+1 */
 
   if (isatty(STDIN_FILENO) && argc == 1) {
       fprintf(stderr,"%s",usage);
@@ -1024,6 +1234,7 @@ int main(int argc, char **argv) {
       slow = 1;
     } else if (strcmp(argv[iArg],"-fastest") == 0) {
       fastest = 1;
+      tophitsRefresh = 0.5;
     } else if (strcmp(argv[iArg], "-matrix") == 0 && iArg < argc-1) {
       iArg++;
       matrixPrefix = argv[iArg];
@@ -1099,6 +1310,14 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[iArg],"-sprlength") == 0 && iArg < argc-1) {
       iArg++;
       maxSPRLength = atoi(argv[iArg]);
+    } else if (strcmp(argv[iArg],"-mlnni") == 0 && iArg < argc-1) {
+      iArg++;
+      MLnni = atoi(argv[iArg]);
+    } else if (strcmp(argv[iArg],"-noml") == 0) {
+      MLnni = 0;
+    } else if (strcmp(argv[iArg],"-nome") == 0) {
+      spr = 0;
+      nni = 0;
     } else if (strcmp(argv[iArg],"-help") == 0) {
       fprintf(stderr,"%s",usage);
       exit(0);
@@ -1126,6 +1345,15 @@ int main(int argc, char **argv) {
 	fprintf(stderr, "Illegal argument to -constraintWeight (must be greater than zero): %s\n", argv[iArg]);
 	exit(1);
       }
+    } else if (strcmp(argv[iArg],"-mlacc") == 0 && iArg < argc-1) {
+      iArg++;
+      mlAccuracy = atoi(argv[iArg]);
+      if (mlAccuracy < 1) {
+	fprintf(stderr, "Illlegal -mlacc argument: %s\n", argv[iArg]);
+	exit(1);
+      }
+    } else if (strcmp(argv[iArg],"-exactml") == 0) {
+      exactML = true;
     } else if (argv[iArg][0] == '-') {
       fprintf(stderr, "Unknown or incorrect use of option %s\n%s", argv[iArg], usage);
       exit(1);
@@ -1166,7 +1394,15 @@ int main(int argc, char **argv) {
       strcpy(nniString, "+NNI");
     char sprString[100] = "(no SPR)";
     if (spr > 0)
-      sprintf(sprString, "+SPR (%d rounds, max-distance %d)", spr, maxSPRLength);
+      sprintf(sprString, "+SPR (%d rounds range %d)", spr, maxSPRLength);
+    char mlnniString[100] = "(no ML-NNI)";
+    if(MLnni > 0)
+      sprintf(mlnniString, "+ML-NNI (%d rounds)", MLnni);
+    else if (MLnni == -1)
+      sprintf(mlnniString, "+ML-NNI");
+    if (MLnni != 0 && exactML)
+      strcat(mlnniString, " exact");
+    sprintf(mlnniString+strlen(mlnniString), " opt-each=%d",mlAccuracy);
 
     fprintf(stderr,"Alignment: %s", fileName != NULL ? fileName : "standard input");
     if (nAlign>1)
@@ -1178,9 +1414,9 @@ int main(int argc, char **argv) {
 	    bionj ? "weighted" : "balanced" ,
 	    supportString);
     if (intreeFile == NULL)
-      fprintf(stderr, "Search: %s %s %s\nTopHits: %s\n",
-	      slow?"Exhaustive (slow)" : (fastest ? "Fastest" : "Normal (fast/relax)"),
-	      nniString, sprString,
+      fprintf(stderr, "Search: %s %s %s %s\nTopHits: %s\n",
+	      slow?"Exhaustive (slow)" : (fastest ? "Fastest" : "Normal"),
+	      nniString, sprString, mlnniString,
 	      tophitString);
     else
       fprintf(stderr, "Start at tree from %s %s %s\n", intreeFile, nniString, sprString);
@@ -1255,7 +1491,7 @@ int main(int argc, char **argv) {
     if (make_matrix) {
       NJ_t *NJ = InitNJ(aln->seqs, aln->nSeq, aln->nPos,
 			/*constraintSeqs*/NULL, /*nConstraints*/0,
-			distance_matrix);
+			distance_matrix, /*transmat*/NULL);
       printf("   %d\n",aln->nSeq);
       int i,j;
       for(i = 0; i < NJ->nSeq; i++) {
@@ -1280,11 +1516,17 @@ int main(int argc, char **argv) {
       nRefreshTopHits = 0;
       nVisibleReset = 0;
       nNNI = 0;
+      nML_NNI = 0;
       nProfileFreqAlloc = 0;
       nProfileFreqAvoid = 0;
       szAllAlloc = 0;
       mymallocUsed = 0;
       maxmallocHeap = 0;
+      nLkCompute = 0;
+      nPosteriorCompute = 0;
+      nAAPosteriorExact = 0;
+      nAAPosteriorRough = 0;
+      nStarTests = 0;
 
       uniquify_t *unique = UniquifyAln(aln);
       ProgressReport("Identified unique sequences",0,0,0,0);
@@ -1304,10 +1546,13 @@ int main(int argc, char **argv) {
 	}
       }	/* end load constraints */
 
+      if (nCodes == 20)
+	InitTransitionMatrix(&transmatJTT92);
       NJ_t *NJ = InitNJ(unique->uniqueSeq, unique->nUnique, aln->nPos,
 			uniqConstraints,
 			uniqConstraints != NULL ? constraints->nPos : 0, /* nConstraints */
-			distance_matrix);
+			distance_matrix,
+			/*transition matrix*/nCodes == 20 ? &transmatJTT92 : NULL);
       if (verbose>1) fprintf(stderr, "read %s seqs %d (%d unique) positions %d nameLast %s seqLast %s\n",
 			     fileName ? fileName : "standard input",
 			     aln->nSeq, unique->nUnique, aln->nPos, aln->names[aln->nSeq-1], aln->seqs[aln->nSeq-1]);
@@ -1334,12 +1579,12 @@ int main(int argc, char **argv) {
 #endif
       int nniToDo = nni == -1 ? 1 + (int)(0.5 + 2.0 * log(NJ->nSeq)/log(2)) : nni;
       int sprRemaining = spr;
+      int MLnniToDo = (MLnni != -1) ? MLnni : (int)(log(NJ->nSeq)/log(2)+1.0);
       if(verbose>0) {
-	if (isatty(STDERR_FILENO)) fprintf(stderr,"\n");
 	if (fpInTree == NULL)
 	    fprintf(stderr, "Initial topology in %.2f seconds\n", (clock()-clock_start)/(double)CLOCKS_PER_SEC);
-	if (spr > 0 || nniToDo > 0)
-	  fprintf(stderr,"Refining topology: %d rounds NNIs, %d rounds SPRs\n", nniToDo, spr);
+	if (spr > 0 || nniToDo > 0 || MLnniToDo > 0)
+	  fprintf(stderr,"Refining topology: %d rounds ME-NNIs, %d rounds ME-SPRs, %d rounds ML-NNIs\n", nniToDo, spr, MLnniToDo);
 	}
 
       if (nniToDo>0) {
@@ -1350,7 +1595,7 @@ int main(int argc, char **argv) {
 	    fflush(stderr);
 	    PrintNJ(stderr, NJ, aln->names, unique);
 	  }
-	  NNI(/*IN/OUT*/NJ, i, nniToDo);
+	  NNI(/*IN/OUT*/NJ, i, nniToDo, /*use ml*/false, /*age*/NULL);
 	  /* Interleave SPRs with NNIs (typically 1/3rd NNI, SPR, 1/3rd NNI, SPR, 1/3rd NNI */
 	  if (sprRemaining > 0 && nniToDo/(spr+1) > 0 && ((i+1) % (nniToDo/(spr+1))) == 0) {
 	    SPR(/*IN/OUT*/NJ, maxSPRLength, spr-sprRemaining, spr);
@@ -1363,42 +1608,77 @@ int main(int argc, char **argv) {
 	sprRemaining--;
       }
 
-      /* Always update branch lengths (even if nni=0) so that they are log-corrected,
-	 do not include penalties from constraints,
+      /* In minimum-evolution mode, update branch lengths, even if no NNIs or SPRs,
+	 so that they are log-corrected, do not include penalties from constraints,
 	 and avoid errors due to approximation of out-distances.
-      */
+	 If doing maximum-likelihood NNIs, then we'll also use these
+	 to get estimates of starting distances for quartets, etc.
+	*/
       UpdateBranchLengths(/*IN/OUT*/NJ);
+
+      if(verbose>0) {
+	double total_len = 0;
+	int iNode;
+	for (iNode = 0; iNode < NJ->maxnode; iNode++)
+	  total_len += fabs(NJ->branchlength[iNode]);
+	fprintf(stderr, "Total branch-length %.3f after %.2f sec\n",
+		total_len,
+		(clock()-clock_start)/(double)CLOCKS_PER_SEC);
+	fflush(stderr);
+      }
+
+      if (MLnniToDo > 0) {
+	/* Convert profiles to use the transition matrix */
+	distance_matrix_t *tmatAsDist = TransMatToDistanceMat(/*OPTIONAL*/NJ->transmat);
+	RecomputeProfiles(NJ, /*OPTIONAL*/tmatAsDist);
+	tmatAsDist = myfree(tmatAsDist, sizeof(distance_matrix_t));
+	double lastloglk = -1e20;
+
+	int *age = mymalloc(sizeof(int)*NJ->maxnodes);
+	int i;
+	for (i = 0; i < NJ->maxnodes; i++)
+	  age[i] = 0;
+
+	int iMLnni;
+	for (iMLnni = 0; iMLnni < MLnniToDo; iMLnni++) {
+	  NNI(/*IN/OUT*/NJ, iMLnni, MLnniToDo, /*use ml*/true, /*IN/OUT*/age);
+	  double loglk = TreeLogLk(NJ);
+	  bool bConverged = (loglk < lastloglk + treeLogLkDelta);
+	  if (verbose)
+	    fprintf(stderr, "After %d rounds of ML-NNIs LogLk %s= %.3f Time %.2f%s\n",
+		    iMLnni+1,
+		    exactML || nCodes != 20 ? "" : "~",
+		    loglk, (clock()-clock_start)/(double)CLOCKS_PER_SEC,
+		    bConverged ? " (converged)" : "");
+	  if (verbose >= 2)
+	    PrintNJ(stderr, NJ, aln->names, unique);
+	  if (bConverged)
+	    break;
+	  lastloglk = loglk;
+	}
+	age = myfree(age, sizeof(int)*NJ->maxnodes);
+	/* Convert profiles back to the distance matrix */
+	RecomputeProfiles(NJ, NJ->distance_matrix);
+      }
+
       SplitCount_t splitcount;
       TestSplits(NJ, /*OUT*/&splitcount);
-      if (nBootstrap > 0) {
-	if(verbose>0) {
-	  double total_len = 0;
-	  int iNode;
-	  for (iNode = 0; iNode < NJ->maxnode; iNode++)
-	    total_len += fabs(NJ->branchlength[iNode]);
-	  if (isatty(STDERR_FILENO)) fprintf(stderr,"\n");
-	  fprintf(stderr, "Total branch-length %.3f after %.2f sec -- computing support values\n",
-		  total_len,
-		  (clock()-clock_start)/(double)CLOCKS_PER_SEC);
-	}
-	fflush(stderr);
+      if (nBootstrap > 0)
 	ReliabilityNJ(NJ);
-      }
       if(verbose) {
-	if (isatty(STDERR_FILENO)) fprintf(stderr,"\n");
 	fprintf(stderr, "Unique: %d/%d", NJ->nSeq, aln->nSeq);
 	if(!slow) fprintf(stderr, " Hill-climb: %ld Update-best: %ld", nBetter, nVisibleReset);
-	if (nniToDo > 0 || spr > 0)
-	  fprintf(stderr, " NNI: %ld SPR: %ld", nNNI, nSPR);
+	if (nniToDo > 0 || spr > 0 || MLnniToDo > 0)
+	  fprintf(stderr, " NNI: %ld SPR: %ld ML-NNI: %ld", nNNI, nSPR, nML_NNI);
 	fprintf(stderr,"\n");
 	if (nCloseUsed>0 || nRefreshTopHits>0)
 	  fprintf(stderr, "Top hits: close neighbors %ld/%d refreshes %ld\n",
 		  nCloseUsed, NJ->nSeq, nRefreshTopHits);
 	if (NJ->nSeq > 3) {
 	  if (NJ->nConstraints == 0) {
-	    fprintf(stderr, "Bad splits: %d of %d\n", splitcount.nBadSplits, splitcount.nSplits);
+	    fprintf(stderr, "Bad splits by min. evo.: %d of %d\n", splitcount.nBadSplits, splitcount.nSplits);
 	  } else {
-	    fprintf(stderr, "Bad splits: %d of %d violating constraints: %d both bad: %d\n",
+	    fprintf(stderr, "Bad splits by min. evo.: %d of %d violating constraints: %d both bad: %d\n",
 		    splitcount.nBadSplits,
 		    splitcount.nSplits,
 		    splitcount.nConstraintViolations,
@@ -1407,9 +1687,18 @@ int main(int argc, char **argv) {
 	  }
 	}
 	double dN2 = NJ->nSeq*(double)NJ->nSeq;
-	fprintf(stderr, "Time %.2f Dist/N**2: by-profile %.3f (out %.3f) by-leaf %.3f Avg %.3f\n",
+	fprintf(stderr, "Time %.2f Dist/N**2: by-profile %.3f (out %.3f) by-leaf %.3f avg-prof %.3f\n",
 		(clock()-clock_start)/(double)CLOCKS_PER_SEC,
 		profileOps/dN2, outprofileOps/dN2, seqOps/dN2, profileAvgOps/dN2);
+	if (MLnniToDo > 0) {
+	  fprintf(stderr, "Max-lk operations: lk %ld posterior %ld", nLkCompute, nPosteriorCompute);
+	  if (nAAPosteriorExact > 0 || nAAPosteriorRough > 0)
+	    fprintf(stderr, " approximate-posteriors %.2f%%",
+		    (100.0*nAAPosteriorRough)/(double)(nAAPosteriorExact+nAAPosteriorRough));
+	  if (mlAccuracy < 2)
+	    fprintf(stderr, " star-only %ld", nStarTests);
+	  fprintf(stderr, "\n");
+	}
 #ifdef TRACK_MEMORY
 	fprintf(stderr, "Memory: %.2f MB (%.1f byte/pos) ",
 		maxmallocHeap/1.0e6, maxmallocHeap/(double)(aln->nSeq*(double)aln->nPos));
@@ -1464,7 +1753,8 @@ void ProgressReport(char *format, int i1, int i2, int i3, int i4) {
 
 NJ_t *InitNJ(char **sequences, int nSeq, int nPos,
 	     /*OPTIONAL*/char **constraintSeqs, int nConstraints,
-	     /*OPTIONAL*/distance_matrix_t *distance_matrix) {
+	     /*OPTIONAL*/distance_matrix_t *distance_matrix,
+	     /*OPTIONAL*/transition_matrix_t *transmat) {
   int iNode;
 
   NJ_t *NJ = (NJ_t*)mymalloc(sizeof(NJ_t));
@@ -1474,6 +1764,7 @@ NJ_t *InitNJ(char **sequences, int nSeq, int nPos,
   NJ->maxnodes = 2*nSeq;
   NJ->seqs = sequences;
   NJ->distance_matrix = distance_matrix;
+  NJ->transmat = transmat;
   NJ->nConstraints = nConstraints;
   NJ->constraintSeqs = constraintSeqs;
 
@@ -2411,7 +2702,7 @@ void ReadTree(/*IN/OUT*/NJ_t *NJ,
   */
   traversal_t traversal = InitTraversal(NJ);
   node = NJ->root;
-  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
+  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal, /*pUp*/NULL)) >= 0) {
     if (node >= NJ->nSeq && node != NJ->root)
       SetProfile(/*IN/OUT*/NJ, node, /*noweight*/-1.0);
   }
@@ -2419,7 +2710,7 @@ void ReadTree(/*IN/OUT*/NJ_t *NJ,
 }
 
 /* Print topology using node indices as node names */
-void PrintNJInternal(FILE *fp, NJ_t *NJ) {
+void PrintNJInternal(FILE *fp, NJ_t *NJ, bool useLen) {
   if (NJ->nSeq < 4) {
     return;
   }
@@ -2439,8 +2730,12 @@ void PrintNJInternal(FILE *fp, NJ_t *NJ) {
     if (node < NJ->nSeq) {
       if (NJ->child[NJ->parent[node]].child[0] != node) fputs(",",fp);
       fprintf(fp, "%d", node);
+      if (useLen)
+	fprintf(fp, ":%.4f", NJ->branchlength[node]);
     } else if (end) {
       fprintf(fp, ")%d", node);
+      if (useLen)
+	fprintf(fp, ":%.4f", NJ->branchlength[node]);
     } else {
             if (node != NJ->root && NJ->child[NJ->parent[node]].child[0] != node) fprintf(fp, ",");
       fprintf(fp, "(");
@@ -3325,6 +3620,10 @@ void NormalizeFreq(/*IN/OUT*/float *freq, distance_matrix_t *dmat) {
     double inverse_weight = 1.0/total_freq;
     for (k = 0; k < nCodes; k++)
       freq[k] *= inverse_weight;
+  } else {
+    /* This can happen if we are in a very low-weight region, just set them all to small values */
+    for (k = 0; k < nCodes; k++)
+      freq[k] = 1.0/nCodes;
   }
 }
 
@@ -3648,7 +3947,6 @@ void SetupDistanceMatrix(/*IN/OUT*/distance_matrix_t *dmat) {
   if(verbose>10) fprintf(stderr, "Made codeFreq\n");
 }
 
-
 nni_t ChooseNNI(profile_t *profiles[4],
 		/*OPTIONAL*/distance_matrix_t *dmat,
 		int nPos, int nConstraints,
@@ -3694,11 +3992,606 @@ nni_t ChooseNNI(profile_t *profiles[4],
   return(choice);
 }
 
+double PSame(double length) {
+  return(0.25 + 0.75 * exp((-4.0/3.0) * fabs(length)));
+}
+
+
+profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
+			    double len1, double len2,
+			    /*OPTIONAL*/transition_matrix_t *transmat,
+			    int nPos, int nConstraints) {
+  if (len1 < MLMinBranchLength)
+    len1 = MLMinBranchLength;
+  if (len2 < MLMinBranchLength)
+    len2 = MLMinBranchLength;
+
+  int i,j,k;
+  profile_t *out = NewProfile(nPos, nConstraints);
+  for (i = 0; i < nPos; i++) {
+    out->codes[i] = NOCODE;
+    out->weights[i] = 1.0;
+  }
+  out->nVectors = nPos;
+  out->vectors = (float*)mymalloc(sizeof(float)*nCodes*out->nVectors);
+  for (i = 0; i < nCodes * out->nVectors; i++) out->vectors[i] = 0;
+  int iFreqOut = 0;
+  int iFreq1 = 0;
+  int iFreq2 = 0;
+
+  if (nCodes == 4) {
+    assert(transmat == NULL);
+
+    float fAll[128][4];
+    for (j = 0; j < 4; j++)
+      for (k = 0; k < 4; k++)
+	fAll[j][k] = (j==k) ? 1.0 : 0.0;
+    for (k = 0; k < 4; k++)
+      fAll[NOCODE][k] = 0.25;
+    
+    double PSame1 = PSame(len1);
+    double PDiff1 = (1.0 - PSame1)/3.0;
+    double PSame2 = PSame(len2);
+    double PDiff2 = (1.0 - PSame2)/3.0;
+
+    float mix1[4], mix2[4];
+
+    for (i=0; i < nPos; i++) {
+      double w1 = p1->weights[i];
+      double w2 = p2->weights[i];
+      int code1 = p1->codes[i];
+      int code2 = p2->codes[i];
+      float *f1 = GET_FREQ(p1,i,/*IN/OUT*/iFreq1);
+      float *f2 = GET_FREQ(p2,i,/*IN/OUT*/iFreq2);
+
+      /* First try to store a simple profile */
+      if (f1 == NULL && f2 == NULL) {
+	if (code1 == NOCODE && code2 == NOCODE) {
+	  out->codes[i] = NOCODE;
+	  out->weights[i] = 0.0;
+	  continue;
+	} else if (code1 == NOCODE) {
+	  /* Posterior(parent | character & gap, len1, len2) = Posterior(parent | character, len1)
+	     = PSame() for matching characters and 1-PSame() for the rest
+	     = (pSame - pDiff) * character + (1-(pSame-pDiff)) * gap
+	  */
+	  out->codes[i] = code2;
+	  out->weights[i] = w2 * (PSame2 - PDiff2);
+	  continue;
+	} else if (code2 == NOCODE) {
+	  out->codes[i] = code1;
+	  out->weights[i] = w1 * (PSame1 - PDiff1);
+	  continue;
+	} else if (code1 == code2) {
+	  out->codes[i] = code1;
+	  double f12code = (w1*PSame1 + (1-w1)*0.25) * (w2*PSame2 + (1-w2)*0.25);
+	  double f12other = (w1*PDiff1 + (1-w1)*0.25) * (w2*PDiff2 + (1-w2)*0.25);
+	  /* posterior probability of code1/code2 after scaling */
+	  double pcode = f12code/(f12code+3*f12other);
+	  /* Now f = w * (code ? 1 : 0) + (1-w) * 0.25, so to get pcode we need
+	     fcode = 1/4 + w1*3/4 or w = (f-1/4)*4/3
+	   */
+	  out->weights[i] = (pcode - 0.25) * 4.0/3.0;
+	  assert(out->weights[i] > 0);
+	  continue;
+	}
+      }
+      /* if we did not compute a simple profile, then do the full computation and
+         store the full vector
+      */
+      if (f1 == NULL) {
+	for (j = 0; j < 4; j++)
+	  mix1[j] = (1-w1)*0.25;
+	if(code1 != NOCODE)
+	  mix1[code1] += w1;
+	f1 = mix1;
+      }
+      if (f2 == NULL) {
+	for (j = 0; j < 4; j++)
+	  mix2[j] = (1-w2)*0.25;
+	if(code2 != NOCODE)
+	  mix2[code2] += w2;
+	f2 = mix2;
+      }
+      out->codes[i] = NOCODE;
+      out->weights[i] = 1.0;
+      float *f = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
+      double lkAB = 0;
+      for (j = 0; j < 4; j++) {
+	f[j] = (f1[j] * PSame1 + (1.0-f1[j]) * PDiff1) * (f2[j] * PSame2 + (1.0-f2[j]) * PDiff2);
+	lkAB += f[j];
+      }
+      double lkABInv = 1.0/lkAB;
+      for (j = 0; j < 4; j++)
+	f[j] *= lkABInv;
+    }
+    /* And reallocate out->vectors to be the right size */
+    out->nVectors = iFreqOut;
+    if (out->nVectors == 0)
+      out->vectors = (float*)myfree(out->vectors, sizeof(float)*nCodes*nPos);
+    else
+      out->vectors = (float*)myrealloc(out->vectors,
+				       /*OLDSIZE*/sizeof(float)*nCodes*nPos,
+				       /*NEWSIZE*/sizeof(float)*nCodes*out->nVectors);
+  } else if (nCodes == 20) {
+    assert(transmat != NULL);
+    float *fGap = &transmat->codeFreq[NOCODE][0];
+    float f1mix[20], f2mix[20];
+    
+    double expeigen1[20];
+    double expeigen2[20];
+    for (j = 0; j < 20; j++) {
+      expeigen1[j] = exp(len1 * transmat->eigenval[j]);
+      expeigen2[j] = exp(len2 * transmat->eigenval[j]);
+    }
+
+    for (i=0; i < nPos; i++) {
+      float *fOut = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
+      assert(fOut != NULL);
+      float *f1 = GET_FREQ(p1,i,/*IN/OUT*/iFreq1);
+      float *f2 = GET_FREQ(p2,i,/*IN/OUT*/iFreq2);
+      if (f1 == NULL) {
+	f1 = &transmat->codeFreq[p1->codes[i]][0]; /* codeFreq includes an entry for NOCODE */
+	double w = p1->weights[i];
+	if (w > 0.0 && w < 1.0) {
+	  for (j = 0; j < 20; j++)
+	    f1mix[j] = w * f1[j] + (1.0-w) * fGap[j];
+	  f1 = f1mix;
+	}
+      }
+      if (f2 == NULL) {
+	f2 = &transmat->codeFreq[p2->codes[i]][0];
+	double w = p2->weights[i];
+	if (w > 0.0 && w < 1.0) {
+	  for (j = 0; j < 20; j++)
+	    f2mix[j] = w * f2[j] + (1.0-w) * fGap[j];
+	  f2 = f2mix;
+	}
+      }
+      double fMult1[20];	/* rotated1 * expeigen1 */
+      double fMult2[20];	/* rotated2 * expeigen2 */
+      for (j = 0; j < 20; j++) {
+	fMult1[j] = f1[j] * expeigen1[j];
+	fMult2[j] = f2[j] * expeigen2[j];
+      }
+      double fPost[20];		/* in  unrotated space */
+      for (j = 0; j < 20; j++) {
+	double out1 = 0;
+	double out2 = 0;
+	for (k = 0; k < 20; k++) {
+	  out1 += fMult1[k] * transmat->eigenmat[j][k];
+	  out2 += fMult2[k] * transmat->eigenmat[j][k];
+	}
+	fPost[j] = out1*out2*transmat->statinv[j];
+      }
+      double fPostTot = 0;
+      for (j = 0; j < 20; j++)
+	fPostTot += fPost[j];
+      assert(fPostTot > 1e-10);
+      double fPostInv = 1.0/fPostTot;
+      for (j = 0; j < 20; j++)
+	fPost[j] *= fPostInv;
+      int ch = -1;		/* the dominant character, if any */
+      if (!exactML) {
+	for (j = 0; j < 20; j++) {
+	  if (fPost[j] >= approxMLminf) {
+	    ch = j;
+	    break;
+	  }
+	}
+      }
+
+      /* now, see if we can use the approximation 
+	 fPost ~= (1 or 0) * w + nearP * (1-w)
+	 to avoid rotating */
+      double w = 0;
+      if (ch >= 0) {
+	w = (fPost[ch] - transmat->nearP[ch][ch]) / (1.0 - transmat->nearP[ch][ch]);
+	for (j = 0; j < 20; j++) {
+	  if (j != ch) {
+	    double fRough = (1.0-w) * transmat->nearP[ch][j];
+	    if (fRough < fPost[j]  * approxMLminratio) {
+	      ch = -1;		/* give up on the approximation */
+	      break;
+	    }
+	  }
+	}
+      }
+      if (ch >= 0) {
+	nAAPosteriorRough++;
+	double wInvStat = w * transmat->statinv[ch];
+	for (j = 0; j < 20; j++)
+	  fOut[j] = wInvStat * transmat->codeFreq[ch][j] + (1.0-w) * transmat->nearFreq[ch][j];
+      } else {
+	/* and finally, divide by stat again & rotate to give the new frequencies */
+	nAAPosteriorExact++;
+	for (j = 0; j < 20; j++) {
+	  double out = 0;
+	  for (k = 0; k < 20; k++)
+	    out += fPost[k] * transmat->statinv[k] * transmat->codeFreq[k][j];
+	  fOut[j] = out;
+	}
+      }
+      if (verbose >= 4 && i <= 5) {
+	fprintf(stderr, "AAPosterior pos %d fOut", i);
+	for (j = 0; j < 20; j++) fprintf(stderr, " %.4f", fOut[j]);
+	fprintf(stderr, "\n");
+      }
+    } /* end loop over position i */
+  } else {
+    assert(0);			/* illegal nCodes */
+  }
+
+  nProfileFreqAlloc += out->nVectors;
+  nProfileFreqAvoid += nPos - out->nVectors;
+
+  /* compute total constraints */
+  for (i = 0; i < nConstraints; i++) {
+    out->nOn[i] = p1->nOn[i] + p2->nOn[i];
+    out->nOff[i] = p1->nOff[i] + p2->nOff[i];
+  }
+  nPosteriorCompute++;
+  return(out);
+}
+
+double PairLogLk(profile_t *pA, profile_t *pB, double length, int nPos,
+		 /*OPTIONAL*/transition_matrix_t *transmat) {
+  double lk = 1.0;
+  double loglk = 0.0;		/* stores underflow of lk during the loop over positions */
+  int i,j,k;
+
+  if (nCodes == 4) {
+    assert(transmat == NULL);
+    double pSame = PSame(length);
+    double pDiff = (1.0 - pSame)/3.0;
+    float fAll[128][4];
+    for (j = 0; j < 4; j++)
+      for (k = 0; k < 4; k++)
+	fAll[j][k] = (j==k) ? 1.0 : 0.0;
+    for (k = 0; k < 4; k++)
+      fAll[NOCODE][k] = 0.25;
+    
+    int iFreqA = 0;
+    int iFreqB = 0;
+    for (i = 0; i < nPos; i++) {
+      double wA = pA->weights[i];
+      double wB = pB->weights[i];
+      int codeA = pA->codes[i];
+      int codeB = pB->codes[i];
+      float *fA = GET_FREQ(pA,i,/*IN/OUT*/iFreqA);
+      float *fB = GET_FREQ(pB,i,/*IN/OUT*/iFreqB);
+      double lkAB = 0;
+
+      if (fA == NULL && fB == NULL) {
+	if (codeA == NOCODE) {	/* A is all gaps */
+	  /* gap to gap is sum(j) 0.25 * (0.25 * pSame + 0.75 * pDiff) = sum(i) 0.25*0.25 = 0.25
+	     gap to any character gives the same result
+	  */
+	  lkAB = 0.25;
+	} else if (codeB == NOCODE) { /* B is all gaps */
+	  lkAB = 0.25;
+	} else if (codeA == codeB) { /* A and B match */
+	  lkAB = pSame * wA*wB + 0.25 * (1-wA*wB);
+	} else {		/* codeA != codeB */
+	  lkAB = pDiff * wA*wB + 0.25 * (1-wA*wB);
+	}
+      } else if (fA == NULL) {
+	/* Compare codeA to profile of B */
+	if (codeA == NOCODE)
+	  lkAB = 0.25;
+	else
+	  lkAB = wA * (pDiff + fB[codeA] * (pSame-pDiff)) + (1.0-wA) * 0.25;
+	/* because lkAB = wA * P(codeA->B) + (1-wA) * 0.25 
+	   P(codeA -> B) = sum(j) P(B==j) * (j==codeA ? pSame : pDiff)
+	   = sum(j) P(B==j) * pDiff + 
+	   = pDiff + P(B==codeA) * (pSame-pDiff)
+	*/
+      } else if (fB == NULL) { /* Compare codeB to profile of A */
+	if (codeB == NOCODE)
+	  lkAB = 0.25;
+	else
+	  lkAB = wB * (pDiff + fA[codeB] * (pSame-pDiff)) + (1.0-wB) * 0.25;
+      } else { /* both are full profiles */
+	for (j = 0; j < 4; j++)
+	  lkAB += fB[j] * (fA[j] * pSame + (1-fA[j])*pDiff); /* P(A|B) */
+      }
+      assert(lkAB > 0);
+      lk *= lkAB;
+      while (lk < LkUnderflow) {
+	lk *= LkUnderflowInv;
+	loglk -= LogLkUnderflow;
+      }
+    }
+  } else if (nCodes == 20) {
+    assert(transmat != NULL);
+    double expeigen[20];
+    for (j = 0; j < 20; j++)
+      expeigen[j] = exp(length * transmat->eigenval[j]);
+
+    int iFreqA = 0;
+    int iFreqB = 0;
+    float fAmix[20], fBmix[20];
+    float *fGap = &transmat->codeFreq[NOCODE][0];
+
+    for (i = 0; i < nPos; i++) {
+      double wA = pA->weights[i];
+      double wB = pB->weights[i];
+      float *fA = GET_FREQ(pA,i,/*IN/OUT*/iFreqA);
+      float *fB = GET_FREQ(pB,i,/*IN/OUT*/iFreqB);
+      if (fA == NULL)
+	fA = &transmat->codeFreq[pA->codes[i]][0];
+      if (wA > 0.0 && wA < 1.0) {
+	for (j  = 0; j < 20; j++)
+	  fAmix[j] = wA*fA[j] + (1.0-wA)*fGap[j];
+	fA = fAmix;
+      }
+      if (fB == NULL)
+	fB = &transmat->codeFreq[pB->codes[i]][0];
+      if (wB > 0.0 && wB < 1.0) {
+	for (j  = 0; j < 20; j++)
+	  fBmix[j] = wB*fB[j] + (1.0-wB)*fGap[j];
+	fB = fBmix;
+      }
+      double lkAB = 0.0; 
+      for (j = 0; j < 20; j++)
+	lkAB += expeigen[j] * fA[j] * fB[j];
+      assert(lkAB > 0);
+      lk *= lkAB;
+      while (lk < LkUnderflow) {
+	lk *= LkUnderflowInv;
+	loglk -= LogLkUnderflow;
+      }
+      while (lk > LkUnderflowInv) {
+	lk *= LkUnderflow;
+	loglk += LogLkUnderflow;
+      }
+    }
+  } else {
+    assert(0);			/* illegal nCodes */
+  }
+  loglk += log(lk);
+  nLkCompute++;
+  return(loglk);
+}
+
+/* This routine is not efficient -- it could compute the likelihood and the
+   posterior profile at the same step
+*/
+double MLQuartetLogLk(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
+		      int nPos, /*OPTIONAL*/transition_matrix_t *transmat,
+		      /*IN*/double branch_lengths[5]) {
+  profile_t *pAB = PosteriorProfile(pA, pB,
+				    branch_lengths[0], branch_lengths[1],
+				    transmat,
+				    nPos, /*nConstraints*/0);
+  profile_t *pCD = PosteriorProfile(pC, pD,
+				    branch_lengths[2], branch_lengths[3],
+				    transmat,
+				    nPos, /*nConstraints*/0);
+  /* Roughly, P(A,B,C,D) = P(A) P(B|A) P(D|C) P(AB | CD) */
+  double loglk = PairLogLk(pA, pB, branch_lengths[0]+branch_lengths[1], nPos, transmat)
+    + PairLogLk(pC, pD, branch_lengths[2]+branch_lengths[3], nPos, transmat)
+    + PairLogLk(pAB, pCD, branch_lengths[4], nPos, transmat);
+  pAB = FreeProfile(pAB, nPos, /*nConstraints*/0);
+  pCD = FreeProfile(pCD, nPos, /*nConstraints*/0);
+  return(loglk);
+}
+
+double PairNegLogLk(double x, void *data) {
+  quartet_opt_t *qo = (quartet_opt_t *)data;
+  assert(qo != NULL);
+  assert(qo->pair1 != NULL && qo->pair2 != NULL);
+  qo->nEval++;
+  double loglk = PairLogLk(qo->pair1, qo->pair2, x, qo->nPos, qo->transmat);
+  if (verbose >= 4)
+    fprintf(stderr, "qo optimizing # %d in %.4f %.4f %.4f %.4f %.4f value %.4f => loglk %.3f\n",
+	    qo->iOpt,
+	    qo->branch_lengths[0], qo->branch_lengths[1],
+	    qo->branch_lengths[2], qo->branch_lengths[3],
+	    qo->branch_lengths[4],
+	    x, loglk);
+  assert(loglk < 1e100);
+  return(-loglk);
+}
+
+double MLQuartetOptimize(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
+			 int nPos, /*OPTIONAL*/transition_matrix_t *transmat,
+			 /*IN/OUT*/double branch_lengths[5],
+			 /*OPTIONAL OUT*/bool *pStarTest) {
+  int j;
+  double start_length[5];
+  for (j = 0; j < 5; j++) {
+    start_length[j] = branch_lengths[j];
+    if (branch_lengths[j] < MLMinBranchLength)
+      branch_lengths[j] = MLMinBranchLength;
+  }
+  quartet_opt_t qopt = { {pA, pB, pC, pD}, nPos, transmat, branch_lengths,
+			 /*iOpt*/0, /*nEval*/0,
+			 /*pair1*/NULL, /*pair2*/NULL };
+  double f2x, negloglk;
+  double quartetloglk;
+
+  if (pStarTest != NULL)
+    *pStarTest = false;
+
+  for (qopt.iOpt = 4; qopt.iOpt >= 0; qopt.iOpt--) {
+    profile_t *profileInternal = NULL; /* may need to be freed at end */
+    bool free1 = true;	/* the pair1 profile may be a leaf; always free the pair2 profile */
+
+    if (qopt.iOpt == 4) {
+      qopt.pair1 = PosteriorProfile(qopt.profiles[0], qopt.profiles[1],
+				    branch_lengths[0], branch_lengths[1],
+				    transmat, nPos, /*nConstraints*/0); /* AB */
+      qopt.pair2 = PosteriorProfile(qopt.profiles[2], qopt.profiles[3],
+				    branch_lengths[2], branch_lengths[3],
+				    transmat, nPos, /*nConstraints*/0); /* CD */
+    } else {
+      free1 = false;
+      qopt.pair1 = qopt.profiles[qopt.iOpt];
+      /* profile pair2 is the other pair plus the sister, e.g. if qopt.iOpt==0, then
+	 we optimize pair likelihood for A to BCD, sib=1, profileInternal is BCD */
+      int iSib = 0;
+      if (qopt.iOpt == 0 || qopt.iOpt == 1) {
+	profileInternal = PosteriorProfile(qopt.profiles[2], qopt.profiles[3],
+					   branch_lengths[2], branch_lengths[3],
+					   transmat, nPos, /*nConstraints*/0); /* CD */
+	iSib = qopt.iOpt == 0 ? 1 : 0;
+      } else {
+	assert(qopt.iOpt == 2 || qopt.iOpt == 3);
+	profileInternal = PosteriorProfile(qopt.profiles[0], qopt.profiles[1],
+					   branch_lengths[0], branch_lengths[1],
+					   transmat, nPos, /*nConstraints*/0); /* AB */
+	iSib = qopt.iOpt == 2 ? 3 : 2;
+      }
+      qopt.pair2 = PosteriorProfile(qopt.profiles[iSib], profileInternal,
+				    branch_lengths[iSib], branch_lengths[4],
+				    transmat, nPos, /*nConstraints*/0);
+    }
+    if (verbose >= 2)
+      fprintf(stderr, "optimizing # %d at %.4f %.4f %.4f %.4f %.4f loglk %.3f\n",
+	      qopt.iOpt, branch_lengths[0], branch_lengths[1], branch_lengths[2], branch_lengths[3], branch_lengths[4],
+	      -PairNegLogLk(branch_lengths[qopt.iOpt], &qopt));
+    branch_lengths[qopt.iOpt] = onedimenmin(/*xmin*/MLMinBranchLength,
+					    /*xguess*/branch_lengths[qopt.iOpt],
+					    /*xmax*/6.0,
+					    PairNegLogLk,
+					    /*data*/&qopt,
+					    /*tol*/MLMinBranchLength,
+					    /*OUT*/&negloglk,
+					    /*OUT*/&f2x);
+    if (verbose >= 2)
+      fprintf(stderr, "optimized # %d to %.4f %.4f %.4f %.4f %.4f loglk %.3f\n",
+	      qopt.iOpt, branch_lengths[0], branch_lengths[1], branch_lengths[2], branch_lengths[3], branch_lengths[4], -negloglk);
+    if (qopt.iOpt == 4 && pStarTest != NULL) {
+      double loglkStar = -PairNegLogLk(MLMinBranchLength, &qopt);
+      if (loglkStar < -negloglk - closeLogLkLimit) {
+	double off = PairLogLk(qopt.profiles[0],qopt.profiles[1],
+			       branch_lengths[0] + branch_lengths[1],
+			       qopt.nPos, qopt.transmat)
+	  + PairLogLk(qopt.profiles[2],qopt.profiles[3],
+		      branch_lengths[2] + branch_lengths[3],
+		      qopt.nPos, qopt.transmat);
+	if (free1)
+	  qopt.pair1 = FreeProfile(qopt.pair1, nPos, /*nConstraints*/0);
+	else
+	  qopt.pair1 = NULL;
+	qopt.pair2 = FreeProfile(qopt.pair2, nPos, /*nConstraints*/0);
+	profileInternal = FreeProfile(profileInternal, nPos, /*nConstraints*/0);
+
+	*pStarTest = true;
+	return (-negloglk + off);
+      }
+    }
+
+    if (qopt.iOpt == 0) {
+	/* this is the last round, we are optimizing A vs. BCD, we
+	   have profiles for CD (in profileInternal) and BCD (in qopt.pair2)
+	   compute the relative quartet likelihood which is
+	   P(C & D) + P(B & CD) + P(A & BCD), where the last one is -negloglk
+	 */
+	assert(profileInternal != NULL);
+	quartetloglk = 	PairLogLk(qopt.profiles[2], qopt.profiles[3],
+				  branch_lengths[2] + branch_lengths[3],
+				  qopt.nPos, qopt.transmat)
+	  + PairLogLk(qopt.profiles[1], profileInternal,
+		      branch_lengths[1] + branch_lengths[4],
+		      qopt.nPos, qopt.transmat)
+	  - negloglk;
+      }
+      if (free1)
+	qopt.pair1 = FreeProfile(qopt.pair1, nPos, /*nConstraints*/0);
+      else
+	qopt.pair1 = NULL;
+      qopt.pair2 = FreeProfile(qopt.pair2, nPos, /*nConstraints*/0);
+      profileInternal = FreeProfile(profileInternal, nPos, /*nConstraints*/0);
+  }
+  if (verbose >= 2) {
+    double loglkStart = MLQuartetLogLk(pA, pB, pC, pD, nPos, transmat, start_length);
+    fprintf(stderr, "Optimize loglk from %.5f to %.5f eval %d lengths from\n"
+	    "   %.5f %.5f %.5f %.5f %.5f to\n"
+	    "   %.5f %.5f %.5f %.5f %.5f\n",
+	    loglkStart, quartetloglk, qopt.nEval,
+	    start_length[0], start_length[1], start_length[2], start_length[3], start_length[4],
+	    branch_lengths[0], branch_lengths[1], branch_lengths[2], branch_lengths[3], branch_lengths[4]);
+  }
+  return(quartetloglk);
+}
+
+nni_t MLQuartetNNI(profile_t *profiles[4],
+		   /*OPTIONAL*/transition_matrix_t *transmat,
+		   int nPos, int nConstraints,
+		   /*OUT*/double criteria[3], /* The three potential quartet log-likelihoods */
+		   /*IN/OUT*/float len[5],
+		   bool bFast)
+{
+  int i;
+  double lenABvsCD[5] = {len[LEN_A], len[LEN_B], len[LEN_C], len[LEN_D], len[LEN_I]};
+  double lenACvsBD[5] = {len[LEN_A], len[LEN_C], len[LEN_B], len[LEN_D], len[LEN_I]};   /* Swap B & C */
+  double lenADvsBC[5] = {len[LEN_A], len[LEN_D], len[LEN_C], len[LEN_B], len[LEN_I]};   /* Swap B & D */
+  bool bConsiderAC = true;
+  bool bConsiderAD = true;
+  int iRound;
+  int nRounds = mlAccuracy < 2 ? 2 : mlAccuracy;
+  double penalty[3];
+  QuartetConstraintPenalties(profiles, nConstraints, /*OUT*/penalty);
+  if (penalty[ABvsCD] > penalty[ACvsBD] || penalty[ABvsCD] > penalty[ADvsBC])
+    bFast = false;
+
+  for (iRound = 0; iRound < nRounds; iRound++) {
+    bool bStarTest = false;
+    criteria[ABvsCD] = MLQuartetOptimize(profiles[0], profiles[1], profiles[2], profiles[3],
+					 nPos, transmat,
+					 /*IN/OUT*/lenABvsCD,
+					 bFast ? &bStarTest : NULL)
+      - penalty[ABvsCD];	/* subtract penalty b/c we are trying to maximize log lk */
+    if (bStarTest) {
+      nStarTests++;
+      criteria[ACvsBD] = -1e20;
+      criteria[ABvsCD] = -1e20;
+      len[LEN_I] = lenABvsCD[LEN_I];
+      return(ABvsCD);
+    }
+    if (bConsiderAC)
+      criteria[ACvsBD] = MLQuartetOptimize(profiles[0], profiles[2], profiles[1], profiles[3],
+					   nPos, transmat,
+					   /*IN/OUT*/lenACvsBD, NULL)
+	- penalty[ACvsBD];
+    if (bConsiderAD)
+      criteria[ADvsBC] = MLQuartetOptimize(profiles[0], profiles[3], profiles[2], profiles[1],
+					   nPos, transmat,
+					   /*IN/OUT*/lenADvsBC, NULL)
+	- penalty[ADvsBC];
+    if (mlAccuracy < 2) {
+      if (criteria[ACvsBD] > criteria[ABvsCD] + closeLogLkLimit)
+	bConsiderAC = false;
+      if (criteria[ADvsBC] > criteria[ABvsCD] + closeLogLkLimit)
+	bConsiderAD = false;
+      if (!bConsiderAC && !bConsiderAD)
+	break;
+    }
+  }
+
+  if (verbose >= 2) {
+    fprintf(stderr, "Optimized quartet for %d rounds: ABvsCD %.5f ACvsBD %.5f ADvsBC %.5f\n",
+	    iRound, criteria[ABvsCD], criteria[ACvsBD], criteria[ADvsBC]);
+  }
+  if (criteria[ACvsBD] > criteria[ABvsCD] && criteria[ACvsBD] > criteria[ADvsBC]) {
+    for (i = 0; i < 5; i++) len[i] = lenACvsBD[i];
+    return(ACvsBD);
+  } else if (criteria[ADvsBC] > criteria[ABvsCD] && criteria[ADvsBC] > criteria[ACvsBD]) {
+    for (i = 0; i < 5; i++) len[i] = lenADvsBC[i];
+    return(ADvsBC);
+  } else {
+    for (i = 0; i < 5; i++) len[i] = lenABvsCD[i];
+    return(ABvsCD);
+  }
+}
+
 double TreeLength(/*IN/OUT*/NJ_t *NJ, bool recomputeProfiles) {
   if (recomputeProfiles) {
     traversal_t traversal2 = InitTraversal(NJ);
     int j = NJ->root;
-    while((j = TraversePostorder(j, NJ, /*IN/OUT*/traversal2)) >= 0) {
+    while((j = TraversePostorder(j, NJ, /*IN/OUT*/traversal2, /*pUp*/NULL)) >= 0) {
       /* nothing to do for leaves or root */
       if (j >= NJ->nSeq && j != NJ->root)
 	SetProfile(/*IN/OUT*/NJ, j, /*noweight*/-1.0);
@@ -3713,67 +4606,231 @@ double TreeLength(/*IN/OUT*/NJ_t *NJ, bool recomputeProfiles) {
   return(total_len);
 }
 
-void NNI(/*IN/OUT*/NJ_t *NJ, int iRound, int nRounds) {
+double TreeLogLk(/*IN*/NJ_t *NJ) {
+  if (NJ->nSeq < 2)
+    return(0.0);
+  double loglk = 0.0;
+  traversal_t traversal = InitTraversal(NJ);
+  int node = NJ->root;
+  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal, /*pUp*/NULL)) >= 0) {
+    int nChild = NJ->child[node].nChild;
+    if (nChild == 0)
+      continue;
+    assert(nChild >= 2);
+    int *children = NJ->child[node].child;
+    double loglkchild = PairLogLk(NJ->profiles[children[0]], NJ->profiles[children[1]],
+				  NJ->branchlength[children[0]]+NJ->branchlength[children[1]],
+				  NJ->nPos, NJ->transmat);
+    loglk += loglkchild;
+
+    if (verbose >= 2)
+      fprintf(stderr, "At %d: LogLk(%d:%.4f,%d:%.4f) = %.3f\n",
+	      node,
+	      children[0], NJ->branchlength[children[0]],
+	      children[1], NJ->branchlength[children[1]],
+	      loglkchild);
+    if (NJ->child[node].nChild == 3) {
+      assert(node == NJ->root);
+      /* Infer the common parent of the 1st two to define the third... */
+      profile_t *pAB = PosteriorProfile(NJ->profiles[children[0]],
+					NJ->profiles[children[1]],
+					NJ->branchlength[children[0]],
+					NJ->branchlength[children[1]],
+					NJ->transmat,
+					NJ->nPos, NJ->nConstraints);
+      double loglkup = PairLogLk(pAB, NJ->profiles[children[2]],
+				 NJ->branchlength[children[2]],
+				 NJ->nPos, NJ->transmat);
+      loglk += loglkup;
+      if (verbose > 2)
+	fprintf(stderr, "At root %d: LogLk((%d/%d),%d:%.3f) = %.3f\n",
+		node, children[0], children[1], children[2],
+		NJ->branchlength[children[2]],
+		loglkup);
+      pAB = FreeProfile(pAB, NJ->nPos, NJ->nConstraints);
+    }
+  }
+  traversal = FreeTraversal(traversal,NJ);
+  /* For Jukes-Cantor, with a tree of size 4, if the children of the root are
+     (A,B), C, and D, then
+     P(ABCD) = P(A) P(B|A) P(C|AB) P(D|ABC)
+     
+     Above we compute P(B|A) P(C|AB) P(D|ABC) -- note P(B|A) is at the child of root
+     and P(C|AB) P(D|ABC) is at root.
+
+     Similarly if the children of the root are C, D, and (A,B), then
+     P(ABCD) = P(C|D) P(A|B) P(AB|CD) P(D), and above we compute that except for P(D)
+
+     So we need to multiply by P(A) = 0.25, so we pay 4*Log2 at each position
+     (if ungapped). Each gapped position in any sequence reduces the payment by 4*Log2.
+
+     For JTT, we are computing P(A & B) and the posterior profiles are scaled to take
+     the prior into account, so we do not need any correction for ungapped sequences.
+     But for gapped sequences, the prior effectively sets P(-) = 1/20
+     whereas the correct value is P(-) = 1, so we correct by nGaps*log(nCodes)
+   */
+  int nGaps = 0;
+  for (node = 0; node < NJ->nSeq; node++) {
+    unsigned char *codes = NJ->profiles[node]->codes;
+    int i;
+    for (i = 0; i < NJ->nPos; i++)
+      if (codes[i] == NOCODE)
+	nGaps++;
+  }
+  if (nCodes == 4 && NJ->transmat == NULL) {
+    return(loglk - (NJ->nPos - nGaps) * 2.0 * Log2);
+  }
+  /* else */
+  assert(NJ->transmat != NULL);
+  return(loglk + nGaps * log((double)nCodes));
+}
+
+void RecomputeProfiles(/*IN/OUT*/NJ_t *NJ, /*OPTIONAL*/distance_matrix_t *dmat) {
+  traversal_t traversal = InitTraversal(NJ);
+  int node = NJ->root;
+  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal, /*pUp*/NULL)) >= 0) {
+    if (NJ->child[node].nChild == 2) {
+      int *child = NJ->child[node].child;
+      NJ->profiles[node] = FreeProfile(NJ->profiles[node], NJ->nPos, NJ->nConstraints);
+      NJ->profiles[node] = AverageProfile(NJ->profiles[child[0]], NJ->profiles[child[1]],
+					  NJ->nPos, NJ->nConstraints,
+					  dmat, /*unweighted*/-1.0);
+    }
+  }
+  traversal = FreeTraversal(traversal,NJ);
+}
+
+void NNI(/*IN/OUT*/NJ_t *NJ, int iRound, int nRounds, bool useML,
+	 /*OPTIONAL IN/OUT*/int *age) {
   /* For each non-root node N, with children A,B, sibling C, and uncle D,
      we compare the current topology AB|CD to the alternate topologies
-     AC|BD and AD|BC, by using log-corrected distances on profiles.
-     (If logdist is false, then the log correction is not done.)
-     It then selects the best topology.
+     AC|BD and AD|BC, by using the 4 relevant profiles.
+
+     If useML is true, it uses quartet maximum likelihood, and it
+     updates branch lengths as it goes.
+
+     If useML is false, it uses the minimum-evolution criterion with
+     log-corrected distances on profiles.  (If logdist is false, then
+     the log correction is not done.) If useML is false, then NNI()
+     does NOT modify the branch lengths.
 
      Regardless of whether it changes the topology, it recomputes the
      profile for the node, using the pairwise distances and BIONJ-like
-     weightings. The parent's profile has changed, but recomputing it
-     is not necessary because we will visit it before we need it (we
-     use postorder, so we may visit the sibling and its children
-     before we visit the parent, but we never consider an ancestor's
-     profile, so that is OK). When we change the parent's profile,
-     this alters the uncle's up-profile, so we remove that.  Finally,
-     if the topology has changed, we remove the up-profiles of the
-     nodes.
+     weightings (if bionj is set). The parent's profile has changed,
+     but recomputing it is not necessary because we will visit it
+     before we need it (we use postorder, so we may visit the sibling
+     and its children before we visit the parent, but we never
+     consider an ancestor's profile, so that is OK). When we change
+     the parent's profile, this alters the uncle's up-profile, so we
+     remove that.  Finally, if the topology has changed, we remove the
+     up-profiles of the nodes.
 
-     NNI() does NOT fix up branch lengths.
+     If we do an NNI during post-order traversal, the result is a bit
+     tricky. E.g. if we are at node N, and have visited its children A
+     and B but not its uncle C, and we do an NNI that swaps B & C,
+     then the post-order traversal will visit C, and its children, but
+     then on the way back up, it will skip N, as it has already
+     visited it.  So, the profile of N will not be recomputed: any
+     changes beneath C will not be reflected in the profile of N, and
+     the profile of N will be slightly stale. This will be corrected
+     on the next round of NNIs.
   */
   int i;
 
   if (NJ->nSeq <= 3)
     return;			/* nothing to do */
-
+  if (verbose > 2) {
+    fprintf(stderr, "Beginning round %d of NNIs with ml? %d\n", iRound, useML?1:0);
+    PrintNJInternal(/*WRITE*/stderr, NJ, /*useLen*/useML && iRound > 0 ? 1 : 0);
+  }
   /* For each node the upProfile or NULL */
   profile_t **upProfiles = UpProfiles(NJ);
   
   traversal_t traversal = InitTraversal(NJ);
   int node = NJ->root;
   int iDone = 0;
-  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
+  bool bUp;
+  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal, &bUp)) >= 0) {
     if (node < NJ->nSeq || node == NJ->root)
       continue; /* nothing to do for leaves or root */
+    if (bUp) {
+      if(verbose >= 2)
+	fprintf(stderr, "Going up back to node %d\n", node);
+      /* No longer needed */
+      for (i = 0; i < NJ->child[node].nChild; i++)
+	DeleteUpProfile(upProfiles, NJ, NJ->child[node].child[i]);
+      DeleteUpProfile(upProfiles, NJ, node);
+      RecomputeProfile(/*IN/OUT*/NJ, /*IN/OUT*/upProfiles, node, useML);
+      continue;
+    }
     if ((iDone % 100) == 0)
-      ProgressReport("NNI round %3d of %3d, %d of %d splits",
+      ProgressReport(useML ? "ML_NNI round %3d of %3d, %d of %d splits"
+		     : "NNI round %3d of %3d, %d of %d splits",
 		     iRound+1, nRounds, iDone+1, NJ->maxnode - NJ->nSeq);
     iDone++;
 
     profile_t *profiles[4];
-    int nodeABC[3];
-    SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
+    int nodeABCD[4];
+    /* Note -- during the first round of ML NNIs, we use the min-evo-based branch lengths,
+       which may be suboptimal */
+    SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABCD, useML);
 
     /* Given our 4 profiles, consider doing a swap */
-    int nodeA = nodeABC[0];
-    int nodeB = nodeABC[1];
-    int nodeC = nodeABC[2];
+    int nodeA = nodeABCD[0];
+    int nodeB = nodeABCD[1];
+    int nodeC = nodeABCD[2];
+    int nodeD = nodeABCD[3];
 
-    if (verbose > 2)
-      fprintf(stderr,"Considering NNI around %d: Swap A=%d B=%d C=%d D=out(C) (node parent %d)\n",
-	      node, nodeA, nodeB, nodeC, NJ->parent[node]);
+    if (verbose >= 2) {
+      fprintf(stderr,"Considering NNI around %d: Swap A=%d B=%d C=%d D=up(%d) or parent %d\n",
+	      node, nodeA, nodeB, nodeC, nodeD, NJ->parent[node]);
+      if (verbose >= 3) {
+	double len[5] = { NJ->branchlength[nodeA], NJ->branchlength[nodeB], NJ->branchlength[nodeC], NJ->branchlength[nodeD],
+			  NJ->branchlength[node] };
+	fprintf(stderr, "Starting quartet likelihood %.3f len %.3f %.3f %.3f %.3f %.3f\n",
+		MLQuartetLogLk(profiles[0],profiles[1],profiles[2],profiles[3],NJ->nPos,NJ->transmat,len),
+		len[0], len[1], len[2], len[3], len[4]);
+      }
+    }
 
+    float newlength[5];
     double criteria[3];
-    nni_t choice = ChooseNNI(profiles, NJ->distance_matrix, NJ->nPos, NJ->nConstraints,
-			     /*OUT*/criteria);
-    if (choice != ABvsCD)
-      nNNI++;
-    if (verbose>1 && choice != ABvsCD)
-      fprintf(stderr,"NNI around %d: Swap A=%d B=%d C=%d D=out(C) -- choose %s deltaLen %.4f\n",
-	      node, nodeA, nodeB, nodeC, choice == ACvsBD ? "AC|BD" : "AD|BC",
+    nni_t choice;
+    if (useML) {
+      for (i = 0; i < 4; i++)
+	newlength[i] = NJ->branchlength[nodeABCD[i]];
+      newlength[4] = NJ->branchlength[node];
+      bool bFast = mlAccuracy < 2 && age != NULL && age[node] > 0
+	&& age[nodeA] > 0 && age[nodeB] > 0 && age[nodeC] > 0 && age[nodeD] > 0;
+      choice = MLQuartetNNI(profiles, NJ->transmat, NJ->nPos, NJ->nConstraints,
+			    /*OUT*/criteria, /*IN/OUT*/newlength, bFast);
+      if (choice != ABvsCD) {
+	nML_NNI++;
+	if (age != NULL)
+	  age[node] = 0;
+      } else if (age != NULL) {
+	age[node]++;
+	/* We never visit leaves or root so to make the above test on bFast work,
+	   we need to increment them too
+	*/
+	for (i = 0; i < 4; i++)
+	  if (nodeABCD[i] < NJ->nSeq || nodeABCD[i] == NJ->root)
+	    age[nodeABCD[i]]++;
+      }
+    } else {
+      choice = ChooseNNI(profiles, NJ->distance_matrix, NJ->nPos, NJ->nConstraints,
+			 /*OUT*/criteria);
+      if (choice != ABvsCD)
+	nNNI++;
+    }
+    if (verbose>1 && (choice != ABvsCD || verbose > 2))
+      fprintf(stderr,"NNI around %d: Swap A=%d B=%d C=%d D=out(C) -- choose %s %s %.4f\n",
+	      node, nodeA, nodeB, nodeC,
+	      choice == ACvsBD ? "AC|BD" : (choice == ABvsCD ? "AB|CD" : "AD|BC"),
+	      useML ? "delta-loglk" : "deltaLen",
 	      criteria[choice] - criteria[ABvsCD]);
+    if(verbose >= 3 && slow && useML)
+      fprintf(stderr, "Old tree lk -- %.4f\n", TreeLogLk(NJ));
 
     if (choice == ACvsBD) {
       /* swap B and C */
@@ -3784,15 +4841,52 @@ void NNI(/*IN/OUT*/NJ_t *NJ, int iRound, int nRounds) {
       ReplaceChild(/*IN/OUT*/NJ, node, nodeA, nodeC);
       ReplaceChild(/*IN/OUT*/NJ, NJ->parent[node], nodeC, nodeA);
     }
+    if (useML) {
+      /* update branch length for the internal branch, and of any
+         branches that lead to leaves, b/c those will not are not
+	 the internal branch for NNI and would not otherwise be set.
+      */
+      if (choice == ADvsBC) {
+	/* For ADvsBC, MLQuartetNNI swaps B with D, but we swap A with C */
+	double length2[5] = { newlength[LEN_C], newlength[LEN_D],
+			      newlength[LEN_A], newlength[LEN_B],
+			      newlength[LEN_I] };
+	int i;
+	for (i = 0; i < 5; i++) newlength[i] = length2[i];
+	/* and swap A and C */
+	double tmp = newlength[LEN_A];
+	newlength[LEN_A] = newlength[LEN_C];
+	newlength[LEN_C] = tmp;
+      } else if (choice == ACvsBD) {
+	/* swap B and C */
+	double tmp = newlength[LEN_B];
+	newlength[LEN_B] = newlength[LEN_C];
+	newlength[LEN_C] = tmp;
+      }
+
+      NJ->branchlength[node] = newlength[LEN_I];
+      NJ->branchlength[nodeA] = newlength[LEN_A];
+      NJ->branchlength[nodeB] = newlength[LEN_B];
+      NJ->branchlength[nodeC] = newlength[LEN_C];
+      NJ->branchlength[nodeD] = newlength[LEN_D];
+    }
 
     /* update profiles */
     if (choice == ABvsCD) {
       /* No longer needed */
       DeleteUpProfile(upProfiles, NJ, nodeA);
       DeleteUpProfile(upProfiles, NJ, nodeB);
-      RecomputeProfile(/*IN/OUT*/NJ, /*IN/OUT*/upProfiles, node);
+      DeleteUpProfile(upProfiles, NJ, nodeC);
+      RecomputeProfile(/*IN/OUT*/NJ, /*IN/OUT*/upProfiles, node, useML);
+      if(slow && useML)
+	UpdateForNNI(NJ, node, upProfiles, useML);
     } else {
-      UpdateForNNI(NJ, node, upProfiles);
+      UpdateForNNI(NJ, node, upProfiles, useML);
+    }
+    if(verbose >= 2 && slow && useML) {
+      /* Note we recomputed profiles back up to root already if slow */
+      PrintNJInternal(/*WRITE*/stderr, NJ, /*useLen*/true);
+      fprintf(stderr, "New tree lk -- %.4f\n", TreeLogLk(NJ));
     }
   } /* end postorder traversal */
   traversal = FreeTraversal(traversal,NJ);
@@ -3820,8 +4914,8 @@ int FindSPRSteps(/*IN/OUT*/NJ_t *NJ,
 
     /* Consider the NNIs around nodeAround */
     profile_t *profiles[4];
-    int nodeABC[3];
-    SetupABCD(NJ, nodeAround, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
+    int nodeABCD[4];
+    SetupABCD(NJ, nodeAround, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABCD, /*useML*/false);
     double criteria[3];
     (void) ChooseNNI(profiles, NJ->distance_matrix, NJ->nPos, NJ->nConstraints,
 		     /*OUT*/criteria);
@@ -3831,24 +4925,24 @@ int FindSPRSteps(/*IN/OUT*/NJ_t *NJ,
     if (iStep == 0 ? bFirstAC : criteria[ACvsBD] < criteria[ADvsBC]) {
       /* swap B & C to put AC together */
       step->deltaLength = criteria[ACvsBD] - criteria[ABvsCD];
-      step->nodes[0] = nodeABC[1];
-      step->nodes[1] = nodeABC[2];
+      step->nodes[0] = nodeABCD[1];
+      step->nodes[1] = nodeABCD[2];
     } else {
       /* swap AC to put AD together */
       step->deltaLength = criteria[ADvsBC] - criteria[ABvsCD];
-      step->nodes[0] = nodeABC[0];
-      step->nodes[1] = nodeABC[2];
+      step->nodes[0] = nodeABCD[0];
+      step->nodes[1] = nodeABCD[2];
     }
 
     if (verbose>1) {
       fprintf(stderr, "SPR chain step %d for %d around %d swap %d %d deltaLen %.5f\n",
 	      iStep+1, nodeAround, nodeMove, step->nodes[0], step->nodes[1], step->deltaLength);
       if (verbose>3)
-	PrintNJInternal(stderr, NJ);
+	PrintNJInternal(stderr, NJ, /*useLen*/false);
     }
     ReplaceChild(/*IN/OUT*/NJ, nodeAround, step->nodes[0], step->nodes[1]);
     ReplaceChild(/*IN/OUT*/NJ, NJ->parent[nodeAround], step->nodes[1], step->nodes[0]);
-    UpdateForNNI(/*IN/OUT*/NJ, nodeAround, /*IN/OUT*/upProfiles);
+    UpdateForNNI(/*IN/OUT*/NJ, nodeAround, /*IN/OUT*/upProfiles, /*useML*/false);
 
     /* set the new nodeAround -- either parent(nodeMove) or sibling(nodeMove) --
        so that it different from current nodeAround
@@ -3883,11 +4977,12 @@ void UnwindSPRStep(/*IN/OUT*/NJ_t *NJ,
     assert(NJ->parent[parents[1]] == parents[0]);
     iYounger = 1;
   }
-  UpdateForNNI(/*IN/OUT*/NJ, parents[iYounger], /*IN/OUT*/upProfiles);
+  UpdateForNNI(/*IN/OUT*/NJ, parents[iYounger], /*IN/OUT*/upProfiles, /*useML*/false);
 }
 
 /* Update the profile of node and its ancestor, and delete nearby out-profiles */
-void UpdateForNNI(/*IN/OUT*/NJ_t *NJ, int node, /*IN/OUT*/profile_t **upProfiles) {
+void UpdateForNNI(/*IN/OUT*/NJ_t *NJ, int node, /*IN/OUT*/profile_t **upProfiles,
+		  bool useML) {
   int i;
   if (slow) {
     /* exhaustive update */
@@ -3897,13 +4992,16 @@ void UpdateForNNI(/*IN/OUT*/NJ_t *NJ, int node, /*IN/OUT*/profile_t **upProfiles
     /* update profiles back to root */
     int ancestor;
     for (ancestor = node; ancestor >= 0; ancestor = NJ->parent[ancestor])
-      RecomputeProfile(/*IN/OUT*/NJ, upProfiles, ancestor);
+      RecomputeProfile(/*IN/OUT*/NJ, upProfiles, ancestor, useML);
 
     /* remove any up-profiles made while doing that*/
     for (i = 0; i < NJ->maxnodes; i++)
       DeleteUpProfile(upProfiles, NJ, i);
   } else {
-    /* if fast, only update around self */
+    /* if fast, only update around self
+       note that upProfile(parent) is still OK after an NNI, but
+       up-profiles of uncles may not be
+    */
     DeleteUpProfile(upProfiles, NJ, node);
     for (i = 0; i < NJ->child[node].nChild; i++)
       DeleteUpProfile(upProfiles, NJ, NJ->child[node].child[i]);
@@ -3917,8 +5015,8 @@ void UpdateForNNI(/*IN/OUT*/NJ_t *NJ, int node, /*IN/OUT*/profile_t **upProfiles
     int uncle = Sibling(NJ, parent);
     if (uncle >= 0)
       DeleteUpProfile(upProfiles, NJ, uncle);
-    RecomputeProfile(/*IN/OUT*/NJ, upProfiles, node);
-    RecomputeProfile(/*IN/OUT*/NJ, upProfiles, parent);
+    RecomputeProfile(/*IN/OUT*/NJ, upProfiles, node, useML);
+    RecomputeProfile(/*IN/OUT*/NJ, upProfiles, parent, useML);
   }
 }
 
@@ -3946,7 +5044,7 @@ void SPR(/*IN/OUT*/NJ_t *NJ, int maxSPRLength, int iRound, int nRounds) {
   int nodeListLen = 0;
   traversal_t traversal = InitTraversal(NJ);
   int node = NJ->root;
-  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
+  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal, /*pUp*/NULL)) >= 0) {
     nodeList[nodeListLen++] = node;
   }
   assert(nodeListLen == NJ->maxnode);
@@ -3958,11 +5056,11 @@ void SPR(/*IN/OUT*/NJ_t *NJ, int maxSPRLength, int iRound, int nRounds) {
   int i;
   for (i = 0; i < nodeListLen; i++) {
     node = nodeList[i];
+    if ((i % 100) == 0)
+      ProgressReport("SPR round %3d of %3d, %d of %d nodes",
+		     iRound+1, nRounds, i+1, nodeListLen);
     if (node == NJ->root)
       continue; /* nothing to do for root */
-    if ((i % 100) == 0)
-      ProgressReport("SPR round %3d of %3d, %d of %d splits",
-		     iRound+1, nRounds, i+1, nodeListLen);
     /* The nodes to NNI around */
     int nodeAround[2] = { NJ->parent[node], Sibling(NJ, node) };
     if (NJ->parent[node] == NJ->root) {
@@ -3975,7 +5073,7 @@ void SPR(/*IN/OUT*/NJ_t *NJ, int maxSPRLength, int iRound, int nRounds) {
       int ACFirst;
       for (ACFirst = 0; ACFirst < 2 && bChanged == false; ACFirst++) {
 	if(verbose > 3)
-	  PrintNJInternal(stderr, NJ);
+	  PrintNJInternal(stderr, NJ, /*useLen*/false);
 	int chainLength = FindSPRSteps(/*IN/OUT*/NJ, node, nodeAround[iAround],
 				       upProfiles, /*OUT*/steps, maxSPRLength, (bool)ACFirst);
 	double dMinDelta = 0.0;
@@ -4001,7 +5099,7 @@ void SPR(/*IN/OUT*/NJ_t *NJ, int maxSPRLength, int iRound, int nRounds) {
 	for (iC = chainLength - 1; iC > iCBest; iC--)
 	  UnwindSPRStep(/*IN/OUT*/NJ, /*IN*/&steps[iC], /*IN/OUT*/upProfiles);
 	if(verbose > 3)
-	  PrintNJInternal(stderr, NJ);
+	  PrintNJInternal(stderr, NJ, /*useLen*/false);
 	while (slow && iCBest >= 0) {
 	  double expected_tot_len = last_tot_len + dMinDelta;
 	  double new_tot_len = TreeLength(NJ, /*recompute*/true);
@@ -4031,7 +5129,7 @@ void SPR(/*IN/OUT*/NJ_t *NJ, int maxSPRLength, int iRound, int nRounds) {
 	DeleteUpProfile(upProfiles, NJ, j);
       int ancestor;
       for (ancestor = NJ->parent[node]; ancestor >= 0; ancestor = NJ->parent[ancestor])
-	RecomputeProfile(/*IN/OUT*/NJ, upProfiles, ancestor);
+	RecomputeProfile(/*IN/OUT*/NJ, upProfiles, ancestor, /*useML*/false);
     }
   } /* end loop over subtrees to prune & regraft */
   steps = myfree(steps, sizeof(spr_step_t) * maxSPRLength);
@@ -4039,28 +5137,46 @@ void SPR(/*IN/OUT*/NJ_t *NJ, int maxSPRLength, int iRound, int nRounds) {
   nodeList = myfree(nodeList, sizeof(int) * NJ->maxnodes);
 }
 
-void RecomputeProfile(/*IN/OUT*/NJ_t *NJ, /*IN/OUT*/profile_t **upProfiles, int node) {
+void RecomputeProfile(/*IN/OUT*/NJ_t *NJ, /*IN/OUT*/profile_t **upProfiles, int node,
+		      bool useML) {
   if (node < NJ->nSeq || node == NJ->root)
     return;			/* no profile to compute */
   assert(NJ->child[node].nChild==2);
 
   profile_t *profiles[4];
   double weight = 0.5;
-  if (!bionj) {
+  if (useML || !bionj) {
     profiles[0] = NJ->profiles[NJ->child[node].child[0]];
     profiles[1] = NJ->profiles[NJ->child[node].child[1]];
   } else {
-    int nodeABC[3];
-    SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
+    int nodeABCD[4];
+    SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABCD, useML);
     weight = QuartetWeight(profiles, NJ->distance_matrix, NJ->nPos);
   }
-  if (verbose>2)
-    fprintf(stderr, "Recompute %d from %d %d weight %.3f\n",
-	    node, NJ->child[node].child[0], NJ->child[node].child[1], weight);
+  if (verbose>2) {
+    if (useML) {
+      fprintf(stderr, "Recompute %d from %d %d lengths %.4f %.4f\n",
+	      node,
+	      NJ->child[node].child[0],
+	      NJ->child[node].child[1],
+	      NJ->branchlength[NJ->child[node].child[0]],
+	      NJ->branchlength[NJ->child[node].child[1]]);
+    } else {
+      fprintf(stderr, "Recompute %d from %d %d weight %.3f\n",
+	      node, NJ->child[node].child[0], NJ->child[node].child[1], weight);
+    }
+  }
   NJ->profiles[node] = FreeProfile(NJ->profiles[node], NJ->nPos, NJ->nConstraints);
-  NJ->profiles[node] = AverageProfile(profiles[0], profiles[1],
-				      NJ->nPos, NJ->nConstraints,
-				      NJ->distance_matrix, weight);
+  if (useML) {
+    NJ->profiles[node] = PosteriorProfile(profiles[0], profiles[1],
+					  NJ->branchlength[NJ->child[node].child[0]],
+					  NJ->branchlength[NJ->child[node].child[1]],
+					  NJ->transmat, NJ->nPos, NJ->nConstraints);
+  } else {
+    NJ->profiles[node] = AverageProfile(profiles[0], profiles[1],
+					NJ->nPos, NJ->nConstraints,
+					NJ->distance_matrix, weight);
+  }
 }
 
 /* The BIONJ-like formula for the weight of A when building a profile for AB is
@@ -4128,7 +5244,7 @@ void UpdateBranchLengths(/*IN/OUT*/NJ_t *NJ) {
   traversal_t traversal = InitTraversal(NJ);
   int node = NJ->root;
 
-  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
+  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal, /*pUp*/NULL)) >= 0) {
     /* reset branch length of node (distance to its parent) */
     if (node == NJ->root)
       continue; /* no branch length to set */
@@ -4145,7 +5261,7 @@ void UpdateBranchLengths(/*IN/OUT*/NJ_t *NJ) {
 	profileC = NJ->profiles[sibs[1]];
       } else {
 	profileB = NJ->profiles[sib];
-	profileC = GetUpProfile(/*IN/OUT*/upProfiles, NJ, NJ->parent[node]);
+	profileC = GetUpProfile(/*IN/OUT*/upProfiles, NJ, NJ->parent[node], /*useML*/false);
       }
       profile_t *profiles[3] = {profileA,profileB,profileC};
       double d[3]; /*AB,AC,BC*/
@@ -4154,15 +5270,15 @@ void UpdateBranchLengths(/*IN/OUT*/NJ_t *NJ) {
       NJ->branchlength[node] = (d[0]+d[1]-d[2])/2.0;
     } else {
       profile_t *profiles[4];
-      int nodeABC[3];
-      SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
+      int nodeABCD[4];
+      SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABCD, /*useML*/false);
       double d[6];
       CorrectedPairDistances(profiles, 4, NJ->distance_matrix, NJ->nPos, /*OUT*/d);
       NJ->branchlength[node] = (d[qAC]+d[qAD]+d[qBC]+d[qBD])/4.0 - (d[qAB]+d[qCD])/2.0;
       
       /* no longer needed */
-      DeleteUpProfile(upProfiles, NJ, nodeABC[0]);
-      DeleteUpProfile(upProfiles, NJ, nodeABC[1]);
+      DeleteUpProfile(upProfiles, NJ, nodeABCD[0]);
+      DeleteUpProfile(upProfiles, NJ, nodeABCD[1]);
     }
   }
   traversal = FreeTraversal(traversal,NJ);
@@ -4213,7 +5329,7 @@ void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ) {
   traversal_t traversal = InitTraversal(NJ);
   int node = NJ->root;
   int iNodesDone = 0;
-  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
+  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal, /*pUp*/NULL)) >= 0) {
     if (node < NJ->nSeq || node == NJ->root)
       continue; /* nothing to do for leaves or root */
 
@@ -4222,8 +5338,8 @@ void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ) {
     iNodesDone++;
 
     profile_t *profiles[4];
-    int nodeABC[3];
-    SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
+    int nodeABCD[4];
+    SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABCD, /*useML*/false);
 
     NJ->support[node] = SplitSupport(profiles[0], profiles[1], profiles[2], profiles[3],
 				     NJ->distance_matrix,
@@ -4231,8 +5347,8 @@ void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ) {
 				     col);
 
     /* no longer needed */
-    DeleteUpProfile(upProfiles, NJ, nodeABC[0]);
-    DeleteUpProfile(upProfiles, NJ, nodeABC[1]);
+    DeleteUpProfile(upProfiles, NJ, nodeABCD[0]);
+    DeleteUpProfile(upProfiles, NJ, nodeABCD[1]);
   }
   traversal = FreeTraversal(traversal,NJ);
   upProfiles = FreeUpProfiles(upProfiles,NJ);
@@ -4273,27 +5389,30 @@ void SetupABCD(NJ_t *NJ, int node,
 	       /* the 4 profiles; the last one is an outprofile */
 	       /*OUT*/profile_t *profiles[4], 
 	       /*IN/OUT*/profile_t **upProfiles,
-	       /*OUT*/int nodeABC[3]) {
+	       /*OUT*/int nodeABCD[4],
+	       bool useML) {
   int parent = NJ->parent[node];
   assert(parent >= 0);
   assert(NJ->child[node].nChild == 2);
-  nodeABC[0] = NJ->child[node].child[0]; /*A*/
-  nodeABC[1] = NJ->child[node].child[1]; /*B*/
+  nodeABCD[0] = NJ->child[node].child[0]; /*A*/
+  nodeABCD[1] = NJ->child[node].child[1]; /*B*/
 
   profile_t *profile4 = NULL;
   if (parent == NJ->root) {
     int sibs[2];
     RootSiblings(NJ, node, /*OUT*/sibs);
-    nodeABC[2] = sibs[0];
+    nodeABCD[2] = sibs[0];
+    nodeABCD[3] = sibs[1];
     profile4 = NJ->profiles[sibs[1]];
   } else {
-    nodeABC[2] = Sibling(NJ,node);
-    assert(nodeABC[2] >= 0);
-    profile4 = GetUpProfile(upProfiles,NJ,parent);
+    nodeABCD[2] = Sibling(NJ,node);
+    assert(nodeABCD[2] >= 0);
+    nodeABCD[3] = parent;
+    profile4 = GetUpProfile(upProfiles,NJ,parent,useML);
   }
   int i;
   for (i = 0; i < 3; i++)
-    profiles[i] = NJ->profiles[nodeABC[i]];
+    profiles[i] = NJ->profiles[nodeABCD[i]];
   profiles[3] = profile4;
 }
 
@@ -4335,17 +5454,17 @@ void TestSplits(NJ_t *NJ, /*OUT*/SplitCount_t *splitcount) {
   traversal_t traversal = InitTraversal(NJ);
   int node = NJ->root;
 
-  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
+  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal, /*pUp*/NULL)) >= 0) {
     if (node < NJ->nSeq || node == NJ->root)
       continue; /* nothing to do for leaves or root */
 
     profile_t *profiles[4];
-    int nodeABC[3];
-    SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
+    int nodeABCD[4];
+    SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABCD, /*useML*/false);
 
     if (verbose>2)
-      fprintf(stderr,"Testing Split around %d: A=%d B=%d C=%d D=out(C) (node parent %d)\n",
-	      node, nodeABC[0], nodeABC[1], nodeABC[2], NJ->parent[node]);
+      fprintf(stderr,"Testing Split around %d: A=%d B=%d C=%d D=up(%d) or node parent %d\n",
+	      node, nodeABCD[0], nodeABCD[1], nodeABCD[2], nodeABCD[3], NJ->parent[node]);
 
     double d[6];		/* distances, perhaps log-corrected distances, no constraint penalties */
     CorrectedPairDistances(profiles, 4, NJ->distance_matrix, NJ->nPos, /*OUT*/d);
@@ -4420,8 +5539,8 @@ void TestSplits(NJ_t *NJ, /*OUT*/SplitCount_t *splitcount) {
     }
     
     /* no longer needed */
-    DeleteUpProfile(upProfiles, NJ, nodeABC[0]);
-    DeleteUpProfile(upProfiles, NJ, nodeABC[1]);
+    DeleteUpProfile(upProfiles, NJ, nodeABCD[0]);
+    DeleteUpProfile(upProfiles, NJ, nodeABCD[1]);
   }
   traversal = FreeTraversal(traversal,NJ);
   upProfiles = FreeUpProfiles(upProfiles,NJ);
@@ -4658,8 +5777,12 @@ int CompareSeeds(const void *c1, const void *c2) {
 void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits) {
   double close = tophitsClose;
   if (close < 0) {
-    double logN = log((double)NJ->nSeq)/log(2.0);
-    close = logN/(logN+2.0);
+    if (fastest && NJ->nSeq >= 50000) {
+      close = 0.99;
+    } else {
+      double logN = log((double)NJ->nSeq)/log(2.0);
+      close = logN/(logN+2.0);
+    }
   }
   /* Sort the potential seeds, by a combination of nGaps and NJ->outDistances
      We don't store nGaps so we need to compute that
@@ -4684,10 +5807,13 @@ void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits) {
   /* For each seed, save its top 2*m hits and then look for close neighbors */
   assert(2*m <= NJ->nSeq);
   int iSeed;
+  int nHasTopHits = 0;
   for(iSeed=0; iSeed < NJ->nSeq; iSeed++) {
     int seed = seeds[iSeed];
     if (iSeed > 0 && (iSeed % 100) == 0)
-      ProgressReport("Top hits for %6d of %6d unique sequences", iSeed, NJ->nSeq, 0, 0);
+      ProgressReport("Top hits for %6d of %6d seqs (at seed %6d)",
+		     nHasTopHits, NJ->nSeq,
+		     iSeed, 0);
     if (tophits[seed] != NULL) {
       if(verbose>2) fprintf(stderr, "Skipping seed %d\n", seed);
       continue;
@@ -4697,6 +5823,7 @@ void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits) {
 
     /* sort & save top hits of self. besthitsSeed is now sorted. */
     tophits[seed] = SortSaveBestHits(besthitsSeed, seed, /*IN-SIZE*/NJ->nSeq, /*OUT-SIZE*/m);
+    nHasTopHits++;
 
     /* find "close" neighbors and compute their top hits */
     double neardist = besthitsSeed[2*m-1].dist * close;
@@ -4726,6 +5853,7 @@ void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits) {
 	&& fabs(closehit->weight - (NJ->nPos - nGaps[seed])) < 1e-5
 	&& fabs(closehit->weight - (NJ->nPos - nGaps[closeNode])) < 1e-5;
       if (tophits[closeNode] == NULL && (close || identical)) {
+	nHasTopHits++;
 	nCloseUsed++;
 	if(verbose>2) fprintf(stderr, "Near neighbor %d (rank %d weight %f ungapped %d %d)\n",
 			      closeNode, iClose, tophits[seed][iClose].weight,
@@ -5340,6 +6468,143 @@ void *myfree(void *p, size_t sz) {
   return(NULL);
 }
 
+/******************************************************************************/
+/* Minimization of a 1-dimensional function by Brent's method (Numerical Recipes)            
+ * Borrowed from Tree-Puzzle 5.1 util.c under GPL
+ * Modified by M.N.P to pass in the accessory data for the optimization function
+ */
+
+#define ITMAX 100
+#define CGOLD 0.3819660
+#define TINY 1.0e-20
+#define ZEPS 1.0e-10
+#define SHFT(a,b,c,d) (a)=(b);(b)=(c);(c)=(d);
+#define SIGN(a,b) ((b) >= 0.0 ? fabs(a) : -fabs(a))
+
+/* Brents method in one dimension */
+double brent(double ax, double bx, double cx, double (*f)(double, void *), void *data, double tol,
+	double *foptx, double *f2optx, double fax, double fbx, double fcx)
+{
+	int iter;
+	double a,b,d=0,etemp,fu,fv,fw,fx,p,q,r,tol1,tol2,u,v,w,x,xm;
+	double xw,wv,vx;
+	double e=0.0;
+
+	a=(ax < cx ? ax : cx);
+	b=(ax > cx ? ax : cx);
+	x=bx;
+	fx=fbx;
+	if (fax < fcx) {
+		w=ax;
+		fw=fax;
+		v=cx;
+		fv=fcx;
+	} else {
+		w=cx;
+		fw=fcx;
+		v=ax;
+		fv=fax;	
+	}
+	for (iter=1;iter<=ITMAX;iter++) {
+		xm=0.5*(a+b);
+		tol2=2.0*(tol1=tol*fabs(x)+ZEPS);
+		if (fabs(x-xm) <= (tol2-0.5*(b-a))) {
+			*foptx = fx;
+			xw = x-w;
+			wv = w-v;
+			vx = v-x;
+			*f2optx = 2.0*(fv*xw + fx*wv + fw*vx)/
+				(v*v*xw + x*x*wv + w*w*vx);
+			return x;
+		}
+		if (fabs(e) > tol1) {
+			r=(x-w)*(fx-fv);
+			q=(x-v)*(fx-fw);
+			p=(x-v)*q-(x-w)*r;
+			q=2.0*(q-r);
+			if (q > 0.0) p = -p;
+			q=fabs(q);
+			etemp=e;
+			e=d;
+			if (fabs(p) >= fabs(0.5*q*etemp) || p <= q*(a-x) || p >= q*(b-x))
+				d=CGOLD*(e=(x >= xm ? a-x : b-x));
+			else {
+				d=p/q;
+				u=x+d;
+				if (u-a < tol2 || b-u < tol2)
+					d=SIGN(tol1,xm-x);
+			}
+		} else {
+			d=CGOLD*(e=(x >= xm ? a-x : b-x));
+		}
+		u=(fabs(d) >= tol1 ? x+d : x+SIGN(tol1,d));
+		fu=(*f)(u,data);
+		if (fu <= fx) {
+			if (u >= x) a=x; else b=x;
+			SHFT(v,w,x,u)
+			SHFT(fv,fw,fx,fu)
+		} else {
+			if (u < x) a=u; else b=u;
+			if (fu <= fw || w == x) {
+				v=w;
+				w=u;
+				fv=fw;
+				fw=fu;
+			} else if (fu <= fv || v == x || v == w) {
+				v=u;
+				fv=fu;
+			}
+		}
+	}
+	*foptx = fx;
+	xw = x-w;
+	wv = w-v;
+	vx = v-x;
+	*f2optx = 2.0*(fv*xw + fx*wv + fw*vx)/
+		(v*v*xw + x*x*wv + w*w*vx);
+	return x;
+} /* brent */
+#undef ITMAX
+#undef CGOLD
+#undef ZEPS
+#undef SHFT
+#undef SIGN
+
+/* one-dimensional minimization - as input a lower and an upper limit and a trial
+  value for the minimum is needed: xmin < xguess < xmax
+  the function and a fractional tolerance has to be specified
+  onedimenmin returns the optimal x value and the value of the function
+  and its second derivative at this point
+  */
+double onedimenmin(double xmin, double xguess, double xmax, double (*f)(double,void*), void *data,
+	double tol, double *fx, double *f2x)
+{
+	double eps, optx, ax, bx, cx, fa, fb, fc;
+		
+	/* first attempt to bracketize minimum */
+	eps = xguess*tol*50.0;
+	ax = xguess - eps;
+	if (ax < xmin) ax = xmin;
+	bx = xguess;
+	cx = xguess + eps;
+	if (cx > xmax) cx = xmax;
+	
+	/* check if this works */
+	fa = (*f)(ax,data);
+	fb = (*f)(bx,data);
+	fc = (*f)(cx,data);
+
+	/* if it works use these borders else be conservative */
+	if ((fa < fb) || (fc < fb)) {
+	  if (ax != xmin) fa = (*f)(xmin,data);
+	  if (cx != xmax) fc = (*f)(xmax,data);
+	  optx = brent(xmin, xguess, xmax, f, data, tol, fx, f2x, fa, fb, fc);
+	} else
+	  optx = brent(ax, bx, cx, f, data, tol, fx, f2x, fa, fb, fc);
+
+	return optx; /* return optimal x */
+} /* onedimenmin */
+
 /* The random number generator is taken from D E Knuth 
    http://www-cs-faculty.stanford.edu/~knuth/taocp.html
 */
@@ -5583,7 +6848,10 @@ traversal_t InitTraversal(NJ_t *NJ) {
   return(worked);
 }
 
-int TraversePostorder(int node, NJ_t *NJ, /*IN/OUT*/traversal_t traversal) {
+int TraversePostorder(int node, NJ_t *NJ, /*IN/OUT*/traversal_t traversal,
+		      /*OPTIONAL OUT*/bool *pUp) {
+  if (pUp)
+    *pUp = false;
   while(1) {
     assert(node >= 0);
 
@@ -5608,6 +6876,12 @@ int TraversePostorder(int node, NJ_t *NJ, /*IN/OUT*/traversal_t traversal) {
     if (node == NJ->root)
       return(-1); /* nowhere to go -- done traversing */
     node = NJ->parent[node];
+    /* If we go up to someplace that was already marked as visited, this is due
+       to a change in topology, so return it marked as "up" */
+    if (pUp && traversal[node]) {
+      *pUp = true;
+      return(node);
+    }
   }
 }
 
@@ -5623,7 +6897,7 @@ profile_t **UpProfiles(NJ_t *NJ) {
   return(upProfiles);
 }
 
-profile_t *GetUpProfile(/*IN/OUT*/profile_t **upProfiles, NJ_t *NJ, int outnode) {
+profile_t *GetUpProfile(/*IN/OUT*/profile_t **upProfiles, NJ_t *NJ, int outnode, bool useML) {
   assert(outnode != NJ->root && outnode >= NJ->nSeq); /* not for root or leaves */
   if (upProfiles[outnode] != NULL)
     return(upProfiles[outnode]);
@@ -5640,17 +6914,35 @@ profile_t *GetUpProfile(/*IN/OUT*/profile_t **upProfiles, NJ_t *NJ, int outnode)
 	 up in the path to the root
       */
       profile_t *profiles[4];
-      int nodeABC[3];
-      SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
-      profile_t *profilesCDAB[4] = { profiles[2], profiles[3], profiles[0], profiles[1] };
-      double weight = QuartetWeight(profilesCDAB, NJ->distance_matrix, NJ->nPos);
-      if (verbose>3)
-	fprintf(stderr, "Compute upprofile of %d from %d and parents (vs. children %d %d) with weight %.3f\n",
-		node, nodeABC[2], nodeABC[0], nodeABC[1], weight);
-      upProfiles[node] = AverageProfile(profiles[2], profiles[3],
-					NJ->nPos, NJ->nConstraints,
-					NJ->distance_matrix,
-					weight);
+      int nodeABCD[4];
+      SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABCD, useML);
+      if (useML) {
+	/* If node is a child of root, then the 4th profile is of the 2nd root-sibling of node
+	   Otherwise, the 4th profile is the up-profile of the parent of node, and that
+	   is the branch-length we need
+	 */
+	double lenC = NJ->branchlength[nodeABCD[2]];
+	double lenD = NJ->branchlength[nodeABCD[3]];
+	if (verbose >= 3) {
+	  fprintf(stderr, "Computing UpProfile for node %d with lenC %.4f lenD %.4f pair-loglk %.3f\n",
+		  node, lenC, lenD,
+		  PairLogLk(profiles[2],profiles[3],lenC+lenD,NJ->nPos,NJ->transmat));
+	  PrintNJInternal(stderr, NJ, /*useLen*/true);
+	}
+	upProfiles[node] = PosteriorProfile(/*C*/profiles[2], /*D*/profiles[3],
+					    lenC, lenD,
+					    NJ->transmat, NJ->nPos, NJ->nConstraints);
+      } else {
+	profile_t *profilesCDAB[4] = { profiles[2], profiles[3], profiles[0], profiles[1] };
+	double weight = QuartetWeight(profilesCDAB, NJ->distance_matrix, NJ->nPos);
+	if (verbose>3)
+	  fprintf(stderr, "Compute upprofile of %d from %d and parents (vs. children %d %d) with weight %.3f\n",
+		  node, nodeABCD[2], nodeABCD[0], nodeABCD[1], weight);
+	upProfiles[node] = AverageProfile(profiles[2], profiles[3],
+					  NJ->nPos, NJ->nConstraints,
+					  NJ->distance_matrix,
+					  weight);
+      }
     }
   }
   FreePath(pathToRoot,NJ);
@@ -5691,6 +6983,93 @@ int *FreePath(int *path, NJ_t *NJ) {
   return(NULL);
 }
 
+void InitTransitionMatrix(/*IN/OUT*/transition_matrix_t *transmat) {
+  int i,j,k;
+  for (j = 0; j < nCodes; j++)
+    transmat->statinv[j] = 1.0/transmat->stat[j];
+  for (i = 0; i < nCodes; i++)
+    for (j = 0; j < nCodes; j++)
+      transmat->codeFreq[i][j] = transmat->eigenmat[i][j];
+  /* gap profile -- by setting it this way, we count the prior once in P(A & gap),
+     but we're off by nCodes, which is corrected for in TreeLogLk */
+  for (i = 0; i < nCodes; i++) {
+    transmat->codeFreq[NOCODE][i] = 0.0;
+    for (j = 0; j < nCodes; j++)
+      transmat->codeFreq[NOCODE][i] += transmat->eigenmat[j][i] / (double) nCodes;
+  }
+  /* save some posterior probabilities for approximating later:
+     first, we compute P(B | A, t) for t = approxMLnearT, by using
+     V * exp(L*t) * V**-1 */
+  double expvalues[MAXCODES];
+  for (i = 0; i < nCodes; i++)
+    expvalues[i] = exp(approxMLnearT * transmat->eigenval[i]);
+  double LVinv[MAXCODES][MAXCODES]; /* exp(L*t) * V**-1 */
+  for (i = 0; i < nCodes; i++) {
+    for (j = 0; j < nCodes; j++)
+      LVinv[i][j] = transmat->eigeninv[i][j] * expvalues[i];
+  }
+  /* matrix transform for converting A -> B given t: transt[i][j] = P(j->i | t) */
+  double transt[MAXCODES][MAXCODES];
+  for (i = 0; i < nCodes; i++) {
+    for (j = 0; j < nCodes; j++) {
+      transt[i][j] = 0;
+      for (k = 0; k < nCodes; k++)
+	transt[i][j] += transmat->eigenmat[i][k] * LVinv[k][j];
+    }
+  }
+  /* nearP[i][j] = P(parent = j | both children are i) = P(j | i,i) ~ stat(j) * P(j->i | t)**2 */
+  for (i = 0; i < nCodes; i++) {
+    double nearP[MAXCODES];
+    double tot = 0;
+    for (j = 0; j < nCodes; j++) {
+      assert(transt[j][i] > 0);
+      assert(transmat->stat[j] > 0);
+      nearP[j] = transmat->stat[j] * transt[i][j] * transt[i][j];
+      tot += nearP[j];
+    }
+    assert(tot > 0);
+    for (j = 0; j < nCodes; j++)
+      nearP[j] *= 1.0/tot;
+    /* save nearP in transmat->nearP[i][] */
+    for (j = 0; j < nCodes; j++)
+      transmat->nearP[i][j] = nearP[j];
+    /* multiply by 1/stat and rotate nearP */
+    for (j = 0; j < nCodes; j++)
+      nearP[j] /= transmat->stat[j];
+    for (j = 0; j < nCodes; j++) {
+      double rot = 0;
+      for (k = 0; k < nCodes; k++)
+	rot += nearP[k] * transmat->eigenmat[k][j];
+      transmat->nearFreq[i][j] = rot;
+    }
+  }
+}
+
+distance_matrix_t *TransMatToDistanceMat(transition_matrix_t *transmat) {
+  if (transmat == NULL)
+    return(NULL);
+  distance_matrix_t *dmat = mymalloc(sizeof(distance_matrix_t));
+  int i, j;
+  for (i=0; i<nCodes; i++) {
+    for (j=0; j<nCodes; j++) {
+      dmat->distances[i][j] = 0;	/* never actually used */
+      dmat->eigeninv[i][j] = transmat->eigeninv[i][j];
+      dmat->codeFreq[i][j] = transmat->codeFreq[i][j];
+    }
+  }
+  /* eigentot . rotated-vector is the total frequency of the unrotated vector
+     (used to normalize in NormalizeFreq()
+     For transition matrices, we rotate by transpose of eigenvectors, so
+     we need to multiply by the inverse matrix by 1....1 to get this vector,
+     or in other words, sum the columns
+  */
+  for(i = 0; i<nCodes; i++) {
+      dmat->eigentot[i] = 0.0;
+      for (j = 0; j<nCodes; j++)
+	dmat->eigentot[i] += transmat->eigeninv[i][j];
+  }
+  return(dmat);
+}
 
 distance_matrix_t matrixBLOSUM45 =
   {
@@ -5747,3 +7126,167 @@ distance_matrix_t matrixBLOSUM45 =
     /*eigentot and codeFreq left out, these are initialized elsewhere*/
   };
  
+/* This decomposition of the JTT92 matrix
+   D. T. Jones, W. R. Taylor, & J. M. Thorton, CABIOS 8:275 (1992)
+   is taken from phylip's proml.c, which in turn credits Elisabeth Tillier
+*/
+transition_matrix_t transmatJTT92 = {
+  /* stationary distribution = abundance of a.a. */
+  { 0.07700000, 0.05100000, 0.04300000, 0.05200000, 0.02000000, 0.04100000, 0.06199999,
+    0.07400000, 0.02300000, 0.05200000, 0.09100000, 0.05899999, 0.02400001, 0.04000000,
+    0.05099999, 0.06900000, 0.05900001, 0.01400001, 0.03200000, 0.06600001 },
+  /* eigenvectors of the transition matrix (in columns), or rotation of each amino acid
+     (in rows)
+  */
+  { { 0.076999996, 0.015604455, -0.049778281, -0.028906423, 0.037181176, 0.044754061,
+      0.058917882, -0.014562092, 0.033789571, -0.113947615, 0.01512923, -0.036405351,
+      0.060831772, -0.050776604, -0.01894566, -0.009444193, 0.145782464, 0.079840455,
+      0.049628261, 0.089153689},
+     {0.051000003, -0.068062363, -0.007118197, 0.092952047, -0.023106564, -0.002503471,
+      0.007320741, 0.022522921, -0.013512235, 0.019230545, 0.023603725, 0.020816769,
+      0.144097327, 0.092833081, -0.007760205, -0.042106824, -0.024348311, 0.018769331,
+      0.016475144, 0.000233354},
+     {0.043000004, 0.020106264, 0.003801272, -0.009615343, -0.004482225, 0.019452517,
+      0.025278141, -0.007094389, 0.088010984, 0.088819683, 0.006681954, 0.011408213,
+      -0.069151377, 0.044069596, -0.015160993, -0.02535015, -0.031216873, 0.078685899,
+      0.094141653, 0.010826822},
+     {0.051999998, 0.070723273, 0.070749616, -0.067870117, -0.029899635, -0.015611487,
+      0.000357541, 0.03480089, 0.017580292, 0.064832765, 0.012360216, 0.019787053, 0.023754576,
+      0.050523021, -0.027254587, -0.055125574, 0.106174443, -0.084329807, -0.04444633, -0.004273519},
+     {0.019999996, 0.011702977, 0.047506147, 0.031970392, 0.118139633, -0.02152807, -0.002831285,
+      -0.000326144, -0.006608005, 0.001801467, -0.000181447, 0.038897829, -0.003322955, -0.002628417,
+      0.009800903, 0.006369612, 0.00202862, -0.00277264, 0.005206131, 0.001440618},
+     {0.041, 0.009674053, 0.006447017, 0.048338335, -0.032298569, -0.013131425, -0.032453034, -0.124039037,
+      -0.037836971, -0.063829682, -0.023011838, 0.017641789, -0.071618574, 0.076542572, -0.013443561, -0.02945416,
+      0.02653866, -0.010099754, -0.001827555, 0.000436077},
+     {0.061999994, 0.074000798, 0.090522425, -0.054396304, -0.04683198, -0.03465365, -0.010177288, 0.020577906,
+      -0.061344686, -0.072001633, -0.008960024, 0.020858533, 0.03353154, -0.06388631, -0.032896517, -0.069922064,
+      -0.113657267, 0.059700608, 0.02195624, 0.001182351},
+     {0.073999997, -0.169750458, -0.053620432, -0.135916654, 0.05566988, -0.047928912, -0.069447924, -0.005056454,
+      -0.034268357, 0.018429333, -0.008533239, -0.006067252, -0.02795295, -0.00854892, -0.022734138, -0.067221068,
+      -0.00755018, -0.019209715, 0.013066683, -0.002255508},
+     {0.022999999, 0.005560808, -0.008508175, 0.017780083, -0.012622847, 0.020608851, -0.034467324, -0.081841576,
+      0.018190209, 0.057465965, 0.012569835, 0.028617353, 0.039519769, -0.084725311, -0.001983861, -0.003004999, 
+      0.000307232, -0.010442992, -0.010415582, -0.000700465},
+     {0.052000004, -0.008208636, 0.037170603, 0.000129242, 0.002023096, 0.067843095, 0.011422358, -0.004381786,
+      -0.068484614, 0.043901014, 0.03216118, -0.064259496, -0.023453968, 0.017401063, 0.00256111, 0.053624311,
+      -0.051241158, -0.042100476, -0.022338403, 0.150589876},
+     {0.090999997, -0.012305869, 0.051805545, 0.031267424, -0.043921088, -0.122130014, -0.128478324, 0.030826152,
+      0.120024744, -0.048050874, 0.061986403, -0.081676567, -0.000630308, -0.006262541, 0.024823166, 0.128862984,
+      0.001310685, -0.006020556, 0.007837197, -0.003911914},
+     {0.058999988, -0.063730179, 0.015413608, 0.116333586, -0.04792557, 0.002521499, 0.04309667, 0.091261631,
+      -0.00319321, -0.001705918, -0.001919083, 0.024421823, -0.098024591, -0.094457679, -0.021256768, -0.057245803,
+      0.035275877, -0.023061786, -0.023397671, -0.00050154},
+     {0.024000007, -0.005674643, 0.019939916, 0.007499746, -0.003452711, 0.013021646, -0.015319944, 0.008878828,
+      -0.001349477, 0.022637173, -0.1400832, -0.028751676, 0.017672997, -0.002818678, 0.001980052, 0.025550508,
+      0.013308898, 0.017246106, -0.002507095, -0.004564983},
+     {0.04, -0.02116828, -0.008431976, -0.032153596, -0.037744513, -0.082891087, 0.113302422, -0.02829487,
+      -0.03000546, 0.017404665, -0.010669741, 0.07095096, 0.003813378, -0.0044122, 0.028136263, 0.087741073,
+      0.002957626, -0.001572858, 0.005177694, 0.00012701},
+     {0.050999992, 0.104586169, -0.143511376, 0.033517051, 0.020822974, -0.061590119, -0.035052393,
+      0.042718836, -0.073063759, 0.043877902, -0.003919454, -0.024199434, -0.009266499, -0.002883973,
+      -0.012364384, -0.001119043, -0.002925034, -0.006703785, 0.017109561, -0.001486973},
+     {0.069, 0.016480839, -0.052486072, -0.013719269, 0.036580187, 0.016270856, 0.046885372, -0.011180886,
+      0.081912399, -0.017089594, -0.003707024, -0.007513119, -0.011192111, 0.028729685, -0.013782446,
+      -0.012036202, -0.065362319, 0.056301316, -0.202340113, -0.018902754},
+     {0.059000006, 0.016765139, -0.032116542, -0.00347293, 0.02331425, 0.051468938, 0.06185183, 
+      -0.012719227, 0.0635245, -0.058489485, -0.026806029, -0.028108766, 0.016013873, -0.004961596,
+      -0.013061091, -0.000913488, -0.071844582, -0.156787357, 0.069681441, -0.054748555},
+     {0.014000008, 0.005936994, -0.000860626, -0.003291821, -0.004807711, 0.002079063, 0.00175743,
+      -0.000753926, 0.000197, 0.000127498, -0.000611603, -0.01198095, -0.002072968, -0.001498627,
+      0.111173981, -0.034864475, 0.000475894, -0.000303638, 0.000120736, 0.000217377},
+     {0.032000004, 0.006046367, -0.02535993, -0.02158326, -0.017504496, 0.081019713, -0.06224497,
+      0.048062375, -0.002481798, -0.029357194, -0.001402648, 0.111761119, -0.010022044, 0.017994575,
+      0.021702122, 0.050124813, -0.000112419, 0.001498195, 0.002201146, -0.000319302},
+     {0.066000005, -0.0082877, 0.03843545, -0.008862168, 0.01086673, 0.082927944, 0.020282093,
+      -0.009399129, -0.09108114, 0.025943972, 0.065312824, -0.076198809, -0.012526904, -0.000232779,
+      0.00046654, 0.055534723, 0.034097762, 0.051363455, 0.004670849, -0.162541651} 
+  },
+  /* eigeninv */
+  {{0.999999950052284, 1.00000005481646, 1.00000009401440, 0.999999956267504, 0.999999817201908,
+    1.00000001638777, 0.999999909709205, 0.999999959232404, 0.999999966318978, 1.00000008991610,
+    0.99999997194146, 0.999999791570328, 1.00000029870857, 1.00000002257718, 0.999999843517526,
+    1.00000000320744, 1.00000010804139, 1.00000057116589, 1.00000011764881, 1.00000008154641},
+   {0.202655272892241, -1.33455613599981, 0.46758752471109, 1.36006295317173, 0.585148881801275,
+    0.235952528852693, 1.19356124233485, -2.29392511005123, 0.241774263707435, -0.157858387569158,
+    -0.135229325688609, -1.08017252494701, -0.236443455805896, -0.529207005289094, 2.05070918838243,
+    0.238852735423592, 0.284154903959505, 0.424070997431246, 0.188948968841888, -0.125571220949772},
+   {-0.64647118231793, -0.139572492423760, 0.088401674973957, 1.36056954807629, 2.37530733723309,
+    0.157244312217572, 1.46003911972317, -0.724600433696886, -0.369920638362543, 0.714819293350663,
+    0.569291710583699, 0.26124759251673, 0.830829838671527, -0.210799397110289, -2.81394855059962,
+    -0.760667703075507, -0.544348171462086, -0.0614732769405775, -0.792497810001558, 0.582355294133812},
+   {-0.375408087146037, 1.82258914902525, -0.223612623627541, -1.30519455844531, 1.59851956193705,
+    1.17898377338468, -0.877359737917553, -1.83671155074582, 0.773047071060265, 0.00248542950013537,
+    0.343598069292634, 1.97175569895831, 0.312489422814916, -0.80383989685035, 0.657197085614762,
+    -0.198829976957015, -0.0588632321466237, -0.235130067929198, -0.674476868680559, -0.134275268337219},
+   {0.482872433514135, -0.453069891300320, -0.104237795443062, -0.574992955633357, 5.90698165720604,
+    -0.787769983400948, -0.755354525968785, 0.752295679208738, -0.548819440467344, 0.0389057002965437,
+    -0.48264932137987, -0.812297811125939, -0.143862975862462, -0.943612829713637, 0.408293622208099,
+    0.53014763868058, 0.395156774270623, -0.343407949515146, -0.547015479240502, 0.164647425659320},
+   {0.581221571541622, -0.0490876727554213, 0.452384118661700, -0.300220914707803, -1.07640348793605,
+    -0.320278654033058, -0.558929845192019, -0.647687999272555, 0.896036997315058, 1.30467490504981,
+    -1.34208807459461, 0.0427372724221128, 0.542568589055878, -2.07227718672532, -1.20764938840742,
+    0.235809499076025, 0.872354867998614, 0.148504530339118, 2.53186604739753, 1.25648400430484},
+   {0.765167304620943, 0.143543953741516, 0.587863752701359, 0.00687579067687178, -0.141564252786317,
+    -0.791537404302759, -0.164149813164521, -0.938485457800501, -1.49857928667020, 0.219660719644142,
+    -1.41184971008152, 0.730452027714022, -0.638330976761459, 2.83256056301555, -0.687301819591672,
+    0.679498144512423, 1.04833608752208, 0.125530727058967, -1.94515531672341, 0.3073044400289},
+   {-0.189118072804360, 0.441625904033917, -0.164985799250740, 0.669247869040832, -0.0163071935851636,
+    -3.02534234807153, 0.331901699135682, -0.0683304595672414, -3.55832935905152, -0.0842651216045257,
+    0.338748918194573, 1.54680729359080, 0.369951200378727, -0.707371766759236, 0.837624222870031,
+    -0.162041833653246, -0.215580121405975, -0.0538518807538433, 1.50194919859299, -0.142411062477756},
+   {0.438825593633407, -0.264945783939997, 2.04676704419067, 0.338082554256199, -0.330400241551311,
+    -0.92285296210523, -0.989430405222627, -0.463085911072473, 0.790878664600223, -1.31701181586371,
+    1.31895322414747, -0.0541221974523582, -0.0562282084901495, -0.750136491725857, -1.43262272374106,
+    1.18713621563513, 1.07668643419114, 0.0140714184735252, -0.077556190945539, -1.38001728137878},
+   {-1.47983915625116, 0.377069509596762, 2.06557400666886, 1.24678394567218, 0.0900733491243716,
+    -1.55682151505840, -1.16131666306051, 0.249045045552781, 2.49852022125199, 0.844250270094283,
+    -0.528031588248614, -0.0289138562415427, 0.943215543121754, 0.435116627183161, 0.860351008204844,
+    -0.247675278013421, -0.991347185379486, 0.00910699324081746, -0.917412324070574, 0.393090481576405},
+   {0.196483508561899, 0.462818136400903, 0.155394271294323, 0.237696449946638, -0.009072331220209,
+    -0.561264328048075, -0.144516518624306, -0.115314036494807, 0.546514589896828, 0.618484215002231,
+    0.681169267422997, -0.0325268464941209, -5.83680002036219, -0.26674352634892, -0.0768520424560124,
+    -0.0537249777713665, -0.454339486388553, -0.0436859502480286, -0.043832753577483, 0.989588260203863},
+   {-0.47279675988913, 0.408171934493836, 0.265307283159536, 0.380520246311962, 1.94489144191947,
+    0.430287526823882, 0.336427948512325, -0.0819898954696501, 1.24423273584023, -1.23575953831749,
+    -0.897544685017816, 0.413929187804309, -1.19798649747527, 1.773773992139, -0.474498712624487,
+    -0.108885770675186, -0.476419759419138, -0.85578211747733, 3.49253495464362, -1.15452740026189},
+   {0.790023010831416, 2.82543777529324, -1.60817154236615, 0.456818769867889, -0.166147740133271,
+    -1.74679450713057, 0.540831291415944, -0.377742570454496, 1.71825081363727, -0.451037863834209,
+    -0.00692645628783304, -1.66143374359216, 0.736374868060064, 0.0953344613626145, -0.181696063136947,
+    -0.162204500358702, 0.271421570504395, -0.148069139908902, -0.313188877576269, -0.189801571441918},
+   {-0.659436406543182, 1.82025648218352, 1.02487431493865, 0.971596553679221, -0.131420838936297,
+    1.86689200924400, -1.03042435249981, -0.115525945457219, -3.68370917495585, 0.334635829352184,
+    -0.0688191420777434, -1.60097760880839, -0.117444920547268, -0.110304997013232, -0.056548482207591,
+    0.416372240377882, -0.0840948477289848, -0.107044766036242, 0.562330465759076, -0.00352695592314758},
+   {-0.246047522358109, -0.152160874689499, -0.352581229991107, -0.524126668770671, 0.490045141407664,
+    -0.32789171464391, -0.5305889852667, -0.307218087162156, -0.0862548220220268, 0.0492521237371297,
+    0.272782031422670, -0.360284204591534, 0.0825021734100633, 0.703406580464713, -0.242438912986346,
+    -0.199745603250112, -0.221374422094988, 7.94099865713703, 0.67819132792268, 0.00706878244346198},
+   {-0.122651854036501, -0.825623996510207, -0.589538385650306, -1.06010719500638, 0.318480619495249,
+    -0.718394143371782, -1.12777522514264, -0.908392812661024, -0.130652118674005, 1.03123675779017,
+    1.41607675442367, -0.970267843474578, 1.06460449334648, 2.19352683818604, -0.0219420140714443,
+    -0.174437707730656, -0.0154828405906343, -2.4903196597317, 1.56640041153342, 0.841435203682253},
+   {1.89327876071481, -0.477417870570514, -0.725973786495843, 2.04181621543318, 0.101431030814253,
+    0.647284379384658, -1.83318173244627, -0.102029474984746, 0.0133578956043195, -0.98540688356854,
+    0.0144031227932779, 0.597896210358231, 0.554537407716484, 0.0739406443741072, -0.0573535991474735,
+    -0.947279975159686, -1.21770477769983, 0.0339924464659552, -0.00351309744475294, 0.516632757833833},
+   {1.03688904051656, 0.368026120110953, 1.82990461017648, -1.62172706404109, -0.138632002615862,
+    -0.246335459078764, 0.962913032005523, -0.259590747242964, -0.454043133771603, -0.80962452968919,
+    -0.0661599643115694, -0.390877715485942, 0.718587718950873, -0.0393214467944365, -0.131446775559997,
+    0.815961086701416, -2.65741281486220, -0.0216884309845026, 0.0468185982774608, 0.778234159873872},
+   {0.644522875888408, 0.323042040088895, 2.18934077178445, -0.854737125232434, 0.260306533433157,
+    -0.0445745131853395, 0.354132910993149, 0.176576802538733, -0.45285140519491, -0.429584665245819,
+    0.0861230354880082, -0.396570700951729, -0.104462280820893, 0.129442351224488, 0.335481596208816,
+    -2.93246540852686, 1.18104136670841, 0.00862402047628377, 0.0687858166364771, 0.0707704398523464},
+   {1.15784011596112, 0.00457556061634755, 0.251786571527989, -0.0821830621633265, 0.0720309234812928,
+    0.0106360277125756, 0.0190701796130324, -0.0304798421211912, -0.0304550263819594, 2.89595914452998,
+    -0.0429880654440584, -0.00850067542464965, -0.190207593622863, 0.00317524228030375, -0.0291563302325800,
+    -0.273952958583118, -0.927941612525147, 0.0155269558250061, -0.00997818390525182, -2.46275227882324}},
+
+  /*eigenval*/
+  { 0.0000000, -0.7031123, -0.6484345, -0.6086499, -0.5514432, -0.7726640,
+    -0.8643413, -1.0620756, -0.9965552, -1.1671808, -1.2222418, -0.4589201,
+    -1.3103714, -1.4048038, -0.3170582, -0.3479350, -1.5311677, -1.6021194,
+    -1.7991454, -1.8911888 },
+};
