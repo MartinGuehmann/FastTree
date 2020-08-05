@@ -221,7 +221,7 @@
 #endif
 
 char *usage =
-  "Usage for FastTree 1.0.3:\n"
+  "Usage for FastTree version 1.0.4:\n"
   "FastTree [-quiet] [-boot 1000] [-seed 1253] [-nni 10] [-slow | -fastest]\n"
   "          [-top | -notop] [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
   "          [-matrix Matrix | -nomatrix] [-nj | -bionj]\n"
@@ -2448,7 +2448,7 @@ double ProfileDistPiece(unsigned int code1, unsigned int code2,
    returns NULL if we didn't store a vector
 */
 #define GET_FREQ(P,I,IVECTOR) \
-(P->weights[i] > 0 && P->codes[i] == NOCODE ? &P->vectors[nCodes*(IVECTOR++)] : NULL);
+(P->weights[I] > 0 && P->codes[I] == NOCODE ? &P->vectors[nCodes*(IVECTOR++)] : NULL);
 
 void ProfileDist(profile_t *profile1, profile_t *profile2, int nPos,
 		 /*OPTIONAL*/distance_matrix_t *dmat,
@@ -3542,7 +3542,7 @@ double SplitSupport(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
 	totp += d[c];
 	totw += w[c];
       }
-      dists[j] = totp > 0.01 ? totp/totw : 3.0;
+      dists[j] = totw > 0.01 ? totp/totw : 3.0;
       if (logdist)
 	dists[j] = LogCorrect(dists[j]);
     }
