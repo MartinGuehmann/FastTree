@@ -1,26 +1,32 @@
 /*
- * FastTree -- neighbor joining for multiple sequence alignments using profiles
- * Morgan N. Price, January-April 2008
+ * FastTreeUPGMA -- Morgan N. Price, January-April 2008
  *
  *  Copyright (C) 2008 The Regents of the University of California
  *  All rights reserved.
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of the University of California nor the
+ *       names of its contributors may be used to endorse or promote products
+ *       derived from this software without specific prior written permission.
  *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
- *  or visit http://www.gnu.org/copyleft/gpl.html
- *
- *  Disclaimer
+ * THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY OF CALIFORNIA ``AS IS''
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+ * PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE UNIVERSITY
+ * OF CALIFORNIA BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
+ * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
  *
  *  NEITHER THE UNITED STATES NOR THE UNITED STATES DEPARTMENT OF ENERGY,
  *  NOR ANY OF THEIR EMPLOYEES, MAKES ANY WARRANTY, EXPRESS OR IMPLIED,
@@ -32,18 +38,13 @@
 
 /*
  * To compile FastTree, do:
- * cc -O2 -lm -o FastTree FastTree.c
- * Use -DTRACK_MEMORY if you want it to report its memory usage
- * (but results are not correct above 4GB because mallinfo stores int values)
+ * gcc -O2 -lm -o FastTreeUPGMA FastTreeUPGMA.c
  *
  * To get usage guidance, do:
- * FastTree -help
+ * FastTreeUPGMA -help
  *
- * FastTree uses profiles instead of a distance matrix, and computes
- * support values for each split from the profiles of the 4 nodes
- * around the split. It stores a profile for each node and a average
- * profile over all active nodes (the "out-profile" for computing the
- * total sum of distance to other nodes).  Requires O(N*L*a) space,
+ * FastTreeUPGMA uses profiles instead of a distance matrix
+ * It stores a profile for each node and thsu requires O(N*L*a) space,
  * where N is the number of sequences, L is the alignment width, and a
  * is the alphabet size
  *
@@ -66,15 +67,15 @@
  * and if A==i, then Ak is the kth column of the inverse of the
  * eigenvector matrix.
  *
- * The exhaustive approach (-slow) takes O(N**3*L*a) time, but
- * this can be reduced to as little as O(N**2*log(N) + N**(3/2)*L*a) time
+ * The exhaustive approach (-notop) takes O(N**2*L*a) time, but
+ * this can be reduced to O(N**2 + N sqrt(N) log(N) L a)
  * by using heuristics.
  *
  * It uses a combination of three heuristics: a visible set similar to
- * that of FastTree (Elias & Lagergren 2005), a local hill-climbing
- * search for a better join (as in relaxed neighbor-joining, Evans et
- * al. 2006), and a top-hit list to reduce the search space (see
- * below).
+ * that of FastTree (Elias & Lagergren 2005) and a top-hit list to
+ * reduce the search space (see below). Unlike in neighbor-joining,
+ * the best join for a node never changes in UPGMA, so there is no
+ * need for hill-climbing.
  *
  * The "visible" set stores, for each node, the best join for that
  * node, as identified at some point in the past
@@ -82,79 +83,16 @@
  * If top-hits are not being used, then the method can be summarized
  * as:
  *
- * Compute the out-profile by averaging the leaves
- * Compute the out-distance of each leaf quickly, using the out-profile
  * Compute the visible set (or approximate it using top-hits, see below)
- * Until we're down to 3 active nodes:
- *   Find the best join in the visible set
- *	(This involves recomputing the neighbor-joining criterion,
- *      as out-distances and #active nodes may have changed)
- *   Follow a chain of best hits (again recomputing the criterion)
- *  	until we find a locally best join, as in relaxed neighbor joining
- *   Create a profile of the parent node, either using simple averages
- *	or using weighted joining as in BIONJ
- *   Update the out-profile and the out-distances
- *   Update the visible set:
+ * Until we're down to 2 active nodes:
+ *   Find the best join in the visible set in O(N) time
+ *       just comparing criterion values -- unlike NJ, they don't change
+ *       Could be reduced to O(log N) time with a priority queue
+ *   Create a profile of the parent node as P = (A+B)/2 in O(La) time
+ *   Set the distance up as P_d(A,B) - P_d(A,A) - P_d(B,B) in O(La) time
+ *   Update the visible set in O(LNa) time
  *      find the best join for the new joined node
  *      replace hits to the joined children with hits to the parent
- *      if we stumble across a join for the new node that is better
- *          than the corresponding entry in the visible set, "reset"
- *          that entry.
- *
- * For each iteration, this method does
- * O(N) work to find the best hit in the visible set
- * O(L*N*a*log(N)) work to do the local search, where log(N)
- *	is a pessimistic estimate of the number of iterations. In
- *      practice, we average <1 iteration for 2,000 sequences.
- * O(N*a) work to compute the joined profile and update the out-profile
- * O(L*N*a) work to update the out-distances
- * O(L*N*a) work to compare the joined profile to the other nodes
- *      (to find the new entry in the visible set)
- *
- * and there are N-3 iterations, so it takes O(N**2 * L * log(N) * a) time.
- *
- * The profile distances give exactly the same result as matrix
- * distances in neighbor-joining or BIONJ would if there are no gaps
- * in the alignment. If there are gaps, then it is an
- * approximation. To get the same result we also store a "diameter"
- * for each node (diameter is 0 for leaves).
- *
- * In the simpler case (NJ rather than BIONJ), when we join A and B to
- * give a new node AB,
- *
- * Profile(AB) = (A+B)/2
- * Profile_distance(AB,C) = (Profile_distance(A,C)+Profile_distance(B,C))/2
- * because the formulas above are linear
- *
- * And according to the neighor-joining rule,
- * d(AB,C) = (d(A,C)+d(B,C)-d(A,B))/2
- *
- * and we can achieve the same value by writing
- * diameter(AB) = pd(A,B)/2
- * diameter(leaf) = 0
- * d(A,B) = pd(A,B) - diameter(A) - diameter(B)
- *
- * because
- * d(AB,C) = (d(A,C)+d(B,C)-d(A,B))/2
- * = (pd(A,C)-diam(A)-diam(C)+pd(B,C)-diam(B)-diam(C)-d(A,B)+diam(A)+diam(B))/2
- * = (pd(A,C)+pd(B,C))/2 - diam(C) - pd(A,B)
- * = pd(AB,C) - diam(AB) - diam(C)
- *
- * If we are using BIONJ, with weight lambda for the join:
- * Profile(AB) = lambda*A + (1-lambda)*B
- * then a similar argument gives
- * diam(AB) = lambda*diam(A) + (1-lambda)*diam(B) + lambda*d(A,AB) + (1-lambda)*d(B,AB),
- *
- * where, as in neighbor joining,
- * d(A,AB) = d(A,B) + (total out_distance(A) - total out_distance(B))/(n-2)
- *
- * A similar recursion formula works for the "variance" matrix of BIONJ,
- * var(AB,C) = lambda*var(A,C) + (1-lambda)*var(B,C) - lambda*(1-lambda)*var(A,B)
- * is equivalent to
- * var(A,B) = pv(A,B) - vd(A) - vd(B), where
- * pv(A,B) = pd(A,B)
- * vd(A) = 0 for leaves
- * vd(AB) = lambda*vd(A) + (1-lambda)*vd(B) + lambda*(1-lambda)*var(A,B)
  *
  * The top-hist heuristic to reduce the work below O(N**2*L) stores a top-hit
  * list of size m=sqrt(N) for each active node.
@@ -170,23 +108,15 @@
  * This method does O(N*L) work for each seed, or O(N**(3/2)*L) work total.
  *
  * To avoid doing O(N*L) work at each iteration, we need to avoid
- * updating the visible set and the out-distances. So, we use "stale"
- * out-distances, and when searching the visible set for the best hit,
- * we only inspect the top m=sqrt(N) entries. We then update those
- * out-distances (up to 2*m*L*a work) and then find the best hit.
+ * updating the entire visible set. So, when searching the visible set
+ * for the best hit, we only inspect the top m=sqrt(N) entries. We
+ * then update those out-distances (up to 2*m*L*a work) and then find
+ * the best hit.
  *
- * FastTree does sort the entire visible set, however, which is
- * O(N*log(N)) work per iteration, or O(N**2*log(N)) work total.
- *
- * Similarly, when doing the local hill-climbing, we avoid O(N*L) work
- * by only considering the top-hits for the current node. So this adds
- * O(m*a*log(N)) work per iteration.
- *
- * When we join two nodes, we compute profiles and update the
- * out-profile as before. We need to compute the best hits of the node
- * -- we merge the lists for the children and select the best up-to-m
- * hits. If the top hit list contains a stale node we replace it with
- * its parent. If we still have <m/2 entries, we do a "refresh".
+ * When we join two nodes, we merge the top-lists for the children and
+ * select the best up-to-m hits. If the top hit list contains a stale
+ * node we replace it with its parent. If we still have <m/2 entries,
+ * we do a "refresh".
  *
  * In a "refresh", similar to the fast top-hit computation above, we
  * compare the "seed", in this case the new joined node, to all other
@@ -199,8 +129,6 @@
  * other nodes with better hits if we find them, and we set the
  * visible entry for the new joined node to the best entry in its
  * top-hit list.
- *
- * Morgan N. Price, March 2008
  */
 
 #include <stdio.h>
@@ -213,63 +141,46 @@
 #include <ctype.h>
 #include <malloc.h>
 
-char *usage = "Usage for FastTree 0.9.1:\n"
-              "FastTree [-quiet] [-boot 1000] [-slow | -fastest]\n"
-              "          [-top | -notop]\n"
-              "          [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
-              "          [-matrix Matrix | -nomatrix] [-nj | -bionj]\n"
-              "          [-nt] [alignment] > newick_tree\n"
-              "\n"
-              "or\n"
-              "\n"
-              "FastTree [-nt] [-matrix Matrix | -nomatrix] [-logdist] -makematrix [alignment]\n"
-              "    > phylip_distance_matrix\n"
-              "\n"
-              "  FastTree supports fasta or phylip interleaved alignments\n"
-              "  By default FastTree expects protein alignments,  use -nt for nucleotides\n"
-              "  FastTree reads standard input if no alignment file is given\n"
-              "\n"
-              "Distances:\n"
-              "  By default, FastTree uses the BLOSUM45 matrix for protein sequences\n"
-              "  and fraction-different as a distance for nucleotides\n"
-              "  To specify a different matrix, use -matrix FilePrefix or -nomatrix\n"
-              "\n"
-              "Searching for the best join:\n"
-              "  by default, FastTree combines the 'visible set' of fast neighbor-joining with\n"
-              "      local hill-climbing as in relaxed neighbor-joining\n"
-              "  -slow -- exhaustive search (standard NJ or BIONJ, but different gap handling)\n"
-              "  -fastest -- search the visible set (the top hit for each node) only\n"
-              "      Unlike the original fast neighbor-joining, -fastest updates visible(C)\n"
-              "      after joining A and B if join(AB,C) is better than join(C,visible(C))\n"
-              "\n"
-              "Top-hit heuristics:\n"
-              "  by default, FastTree uses a top-hit list to speed up search\n"
-              "  use -notop (or -slow) to turn this feature off\n"
-              "         and compare all leaves to each other,\n"
-              "         and all new joined nodes to each other\n"
-              "  -topm 1.0 -- set the top-hit list size to parameter*sqrt(N)\n"
-              "         FastTree estimates the top m hits of a leaf from the\n"
-              "         top 2*m hits of a 'close' neighbor, where close is\n"
-              "         defined as d(seed,close) < 0.75 * d(seed, hit of rank 2*m),\n"
-              "         and updates the top-hits as joins proceed\n"
-              "  -close 0.75 -- modify the close heuristic, lower is more conservative\n"
-              "  -refresh 0.8 -- compare a joined node to all other nodes if its\n"
-              "         top-hit list is less than 80% of the desired length,\n"
-              "         or if the age of the top-hit list is log2(m) or greater\n"
-              "\n"
-              "Join options:\n"
-              "  -bionj: weighted joins as in BIONJ (default)\n"
-              "  -nj: regular (unweighted) neighbor-joining\n"
-              "\n"
-              "Support value options:\n"
-              "  by default, FastTree computes support by a maximum-of-normals test\n"
-              "  This test approximates a local form of bootstrap.\n"
-              "\n"
-              "   -boot 1000 -- Compute local bootstrap, where the argument is the\n"
-              "          number of replicates. Reported support values still range from\n"
-              "          0 to 1. Local bootstrap does not recompute the topology for each\n" 
-              "          replicate, so it is very fast.\n"
-              "\n";
+char *usage =
+  "Usage for FastTreeUPGMA\n"
+  "FastTreeUPGMA [-quiet] [-balanced]\n"
+  "          [-notop] [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
+  "          [-matrix Matrix | -nomatrix]\n"
+  "          [-nt] [alignment] > newick_tree\n"
+  "\n"
+  "or\n"
+  "\n"
+  "FastTree [-nt] [-matrix Matrix | -nomatrix] -makematrix [alignment]\n"
+  "    > phylip_distance_matrix\n"
+  "\n"
+  "  FastTree supports fasta or phylip interleaved alignments\n"
+  "  By default FastTree expects protein alignments,  use -nt for nucleotides\n"
+  "  FastTree reads standard input if no alignment file is given\n"
+  "\n"
+  "Distances:\n"
+  "  By default, FastTreeUPGMA uses the BLOSUM45 matrix for protein sequences\n"
+  "  and fraction-different as a distance for nucleotides\n"
+  "  To specify a different matrix, use -matrix FilePrefix or -nomatrix\n"
+  "\n"
+  "Joins:\n"
+  "  By default, FastTreeUPGMA uses unweighted joins (UPGMA)\n"
+  "  -balanced -- use balanced or weighted joins (WPGMA) instead\n"
+  "\n"
+  "Top-hit heuristics:\n"
+  "  by default, FastTreeUPGMA uses a top-hit list to speed up search\n"
+  "  use -notop to turn this feature off\n"
+  "         and compare all leaves to each other,\n"
+  "         and all new joined nodes to each other\n"
+  "  -topm 1.0 -- set the top-hit list size to parameter*sqrt(N)\n"
+  "         FastTree estimates the top m hits of a leaf from the\n"
+  "         top 2*m hits of a 'close' neighbor, where close is\n"
+  "         defined as d(seed,close) < 0.75 * d(seed, hit of rank 2*m),\n"
+  "         and updates the top-hits as joins proceed\n"
+  "  -close 0.75 -- modify the close heuristic, lower is more conservative\n"
+  "  -refresh 0.8 -- compare a joined node to all other nodes if its\n"
+  "         top-hit list is less than 80% of the desired length,\n"
+  "         or if the age of the top-hit list is log2(m) or greater\n";
+
 
 typedef struct {
   int nPos;
@@ -303,10 +214,6 @@ typedef struct {
    using the neighbor-joining criterion, at the time the comparison was made,
    or approximately so since then.
 
-   Note that variance = dist because in BIONJ, constant factors of variance do not matter,
-   and because we weight ungapped sequences higher naturally when averaging profiles,
-   so we do not take this into account in the computation of "lambda" for BIONJ.
-
    For the top-hit list heuristic, if the top hit list becomes "too short",
    we store invalid entries with i=j=-1 and dist/criterion very high.
 */
@@ -314,7 +221,7 @@ typedef struct {
   int i, j;
   float weight;			/* Total product of weights (maximum value is nPos) */
   float dist;			/* The uncorrected distance (includes diameter correction) */
-  float criterion;		/* changes when we update the out-profile or change nActive */
+  float criterion;		/* Lower is better */
 } besthit_t;
 
 typedef struct { int nChild; int child[3]; } children_t;
@@ -345,66 +252,49 @@ typedef struct {
   /* The input */
   int nSeq;
   int nPos;
-  char **seqs;			/* a copy of the aligment sequences array */
+  char **seqs;			/* the aligment sequences array (not re-allocated) */
   distance_matrix_t *distance_matrix; /* or NULL if using %identity distance */
 
   /* The profile data structures */
   int maxnode;			/* The next index to allocate */
   int maxnodes;			/* Space allocated in data structures below */
   profile_t **profiles;         /* Profiles of leaves and intermediate nodes */
-  float *diameter;		/* To correct for distance "up" from children (if any) */
-  float *varDiameter;		/* To correct variances for distance "up" */
-  float *selfdist;		/* Saved for use in some formulas */
-  float *selfweight;		/* Saved for use in some formulas */
 
-  /* Average profile of all active nodes, the "outprofile"
-   * If all inputs are ungapped, this has weight 1 (not nSequences) at each position
-   * The frequencies all sum to one (or that is implied by the eigen-representation)
+  /* Average profile of all input nodes, the "outprofile" -- this
+     is used to sort the seeds, and is not updated thereafter
    */
   profile_t *outprofile;
-  double totdiam;
 
-  /* We sometimes use stale out-distances, so we remember what nActive was  */
-  float *outDistances;		/* Sum of distances to other active (parent==-1) nodes */
-  int *nOutDistActive;		/* What nActive was when this outDistance was computed */
+  float *outDistances; 		/* Out-distances of leaves, for use in selecting seeds */
+  float *nodeHeight;		/* Total height of the node */
+  int *nSize;			/* Total number of leaves at this level or below */
 
   /* the inferred tree */
   int root;			/* index of the root. Unlike other internal nodes, it has 3 children */
   int *parent;			/* -1 or index of parent */
   children_t *child;
   float *branchlength;		/* Distance to parent */
-  float *support;		/* 1 for high-confidence nodes */
-} NJ_t;
+} UPGMA_t;
 
 /* Global variables */
 /* Options */
 int verbose = 1;
-int slow = 0;
-int fastest = 0;
-int bionj = 1;
+int balanced = 0;
 double tophitsMult = 1.0;	/* 0 means compare nodes to all other nodes */
 double tophitsClose = 0.75;	/* Parameter for how close is close; also used as a coverage req. */
 double tophitsRefresh = 0.8;	/* Refresh if fraction of top-hit-length drops to this */
-double staleOutLimit = 0.02;	/* nActive changes by at most this amount before we recompute */
-int nRecomputeOutProfile = 200;	/* Recompute out-profile every this many joins (avoid roundoff) */
-int nBootstrap = 0;		/* If set, number of replicates of local bootstrap to do */
 int nCodes=20;			/* 20 if protein, 4 if nucleotide */
 bool useMatrix=true;
 
 /* Performance and memory usage */
 long profileOps = 0;		/* Full profile-based distance operations */
-long outprofileOps = 0;		/* How many of profileOps are comparisons to outprofile */
 long seqOps = 0;		/* Faster leaf-based distance operations */
-long nBetter = 0;		/* Number of hill-climbing steps */
 long nCloseUsed = 0;		/* Number of "close" neighbors we avoid full search for */
 long nRefreshTopHits = 0;	/* Number of full-blown searches (interior nodes) */
-long nVisibleReset = 0;		/* Number of resets of the visible set */
-long nSuboptimalSplits = 0;	/* Number of splits that are rejected given full topology */
 long nProfileFreqAlloc = 0;
 long nProfileFreqAvoid = 0;
 long szAllAlloc = 0;
 long mymallocUsed = 0;		/* useful allocations by mymalloc */
-long maxmallocHeap = 0;		/* Maximum of mi.arena+mi.hblkhd from mallinfo (actual mem usage) */
 
 /* Protein character set */
 unsigned char *codesStringAA = (unsigned char*) "ARNDCQEGHILKMFPSTWYV";
@@ -416,31 +306,15 @@ void SetupDistanceMatrix(/*IN/OUT*/distance_matrix_t *); /* set eigentot, codeFr
 void ReadMatrix(char *filename, /*OUT*/float codes[MAXCODES][MAXCODES], bool check_codes);
 void ReadVector(char *filename, /*OUT*/float codes[MAXCODES]);
 alignment_t *ReadAlignment(/*IN*/char *filename); /* Returns a list of strings (exits on failure) */
-NJ_t *InitNJ(char **sequences, int nSeqs, int nPos,
+UPGMA_t *InitUPGMA(char **sequences, int nSeqs, int nPos,
 	     /*IN OPTIONAL*/distance_matrix_t *); /* Allocates memory, initializes */
-void FastNJ(/*IN/OUT*/NJ_t *NJ); /* Does the joins */
-void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ);	  /* Estimates the reliability of the joins */
-void PrintNJ(FILE *, NJ_t *NJ, char **names, int *uniqueFirst, int *nameNext);
+void FastUPGMA(/*IN/OUT*/UPGMA_t *UPGMA); /* Does the joins */
+void PrintUPGMA(FILE *, UPGMA_t *UPGMA, char **names, int *uniqueFirst, int *nameNext);
 
-/* Use out-profile and NJ->totdiam to recompute out-distance for node iNode
-   Only does this computation if the out-distance is "stale" (nOutDistActive[iNode] != nActive)
- */
-void SetOutDistance(/*IN/UPDATE*/NJ_t *NJ, int iNode, int nActive);
+/* Computes weight and distance and then sets the criterion */
+void SetDistCriterion(/*IN*/UPGMA_t *UPGMA, int nActive, /*IN/OUT*/besthit_t *join);
 
-/* Always sets join->criterion; may update NJ->outDistance and NJ->nOutDistActive,
-   assumes join's weight and distance are already set
-*/
-void SetCriterion(/*IN/UPDATE*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join);
-
-/* Computes weight and distance and then sets the criterion (maybe update out-distances) */
-void SetDistCriterion(/*IN/UPDATE*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join);
-
-/* Reports the support for the (1,2) vs. (3,4) split */
-double SplitSupport(profile_t *p1, profile_t *p2, profile_t *p3, profile_t *p4,
-		    /*OPTIONAL*/distance_matrix_t *dmat,
-		    int nPos);
-
-profile_t *SeqToProfile(NJ_t *NJ, char *seq, int nPos, int iNode);
+profile_t *SeqToProfile(UPGMA_t *UPGMA, char *seq, int nPos, int iNode);
 
 /* ProfileDist and SeqDist only set the dist and weight fields
    If using an outprofile, use the second argument of ProfileDist
@@ -453,23 +327,13 @@ void SeqDist(unsigned char *codes1, unsigned char *codes2, int nPos,
 	     /*OPTIONAL*/distance_matrix_t *distance_matrix,
 	     /*OUT*/besthit_t *hit);
 
-/* AverageProfile is used to do a weighted combination of nodes
-   when doing a join. If weight is negative, then the value is ignored and the profiles
-   are averaged. The weight is *not* adjusted for the gap content of the nodes...
-*/
 profile_t *AverageProfile(profile_t *profile1, profile_t *profile2, int nPos,
-			  distance_matrix_t *distance_matrix,
-			  double weight1);
+			  distance_matrix_t *distance_matrix, double weight1);
 
 /* OutProfile does an unweighted combination of nodes to create the
-   out-profile. It always sets code to NOCODE so that UpdateOutProfile
-   can work.
+   out-profile. It always sets code to NOCODE.
 */
 profile_t *OutProfile(profile_t **profiles, int nProfiles, int nPos,
-		      distance_matrix_t *distance_matrix);
-
-void UpdateOutProfile(/*UPDATE*/profile_t *out, profile_t *old1, profile_t *old2,
-		      profile_t *new, int nActiveOld, int nPos,
 		      distance_matrix_t *distance_matrix);
 
 profile_t *NewProfile(int nPos); /* returned has no vectors */
@@ -504,35 +368,22 @@ void SetCodeDist(/*IN/OUT*/profile_t *profile, int nPos, distance_matrix_t *dmat
    Note that the following routines do not handle the tophits heuristic
    and assume that out-distances are up to date.
 */
-void SetBestHit(int node, NJ_t *NJ, int nActive,
+void SetBestHit(int node, UPGMA_t *UPGMA, int nActive,
 		/*OUT*/besthit_t *bestjoin,
 		/*OUT OPTIONAL*/besthit_t *allhits);
-void ExhaustiveNJSearch(NJ_t *NJ, int nActive, /*OUT*/besthit_t *bestjoin);
-
-/* Searches the visible set */
-void FastNJSearch(NJ_t *NJ, int nActive, /*UPDATE*/besthit_t *visible, /*OUT*/besthit_t *bestjoin);
 
 /* Subroutines for handling the tophits heuristic
-   NJ may be modified because of updating of out-distances
+   UPGMA may be modified because of updating of out-distances
 */
 
 /* Before we do any joins -- sets tophits */
-void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits);
-
-/* Find the best join to do */
-void TopHitNJSearch(/*IN/UPDATE*/NJ_t *NJ,
-		    int nActive,
-		    int m,
-		    /*IN/UPDATE*/besthit_t *visible,
-		    /*IN/UPDATE*/besthit_t **tophits,
-		    /*OUT*/besthit_t *bestjoin);
+void SetAllLeafTopHits(UPGMA_t *UPGMA, int m, /*OUT*/besthit_t **tophits);
 
 /* Returns the index of the best hit within the tophits.
-   NJ may be modified because it updates out-distances if necessary
    tophits may be modified because it walks "up" from hits to joined nodes
    Does *not* update visible set
 */
-int GetBestFromTopHits(int iNode, /*IN/UPDATE*/NJ_t *NJ, int nActive,
+int GetBestFromTopHits(int iNode, /*IN*/UPGMA_t *UPGMA, int nActive,
 			/*IN/UPDATE*/besthit_t *tophits, /* of iNode */
 		       int nTopHits);
 
@@ -540,7 +391,7 @@ int GetBestFromTopHits(int iNode, /*IN/UPDATE*/NJ_t *NJ, int nActive,
    a "refresh", but we also set the visible set for newnode and do any
    "reset" updates too. And, we update many outdistances.
  */
-void TopHitJoin(/*IN/UPDATE*/NJ_t *NJ, int newnode, int nActive, int m,
+void TopHitJoin(/*IN/UPDATE*/UPGMA_t *UPGMA, int newnode, int nActive, int m,
 		/*IN/OUT*/besthit_t **tophits,
 		/*IN/OUT*/int *tophitAge,
 		/*IN/OUT*/besthit_t *visible);
@@ -560,7 +411,7 @@ besthit_t *SortSaveBestHits(/*IN/UPDATE*/besthit_t *besthits, int iNode, int nIn
    (and ensures that out-distances are updated)
 
  */
-void TransferBestHits(/*IN/UPDATE*/NJ_t *NJ, int nActive,
+void TransferBestHits(/*IN/UPDATE*/UPGMA_t *UPGMA, int nActive,
 		      int iNode,
 		      /*IN*/besthit_t *oldhits,
 		      int nOldHits,
@@ -569,10 +420,10 @@ void TransferBestHits(/*IN/UPDATE*/NJ_t *NJ, int nActive,
 
 /* Given a top-hit list, look for improvements to the visible set of (j).
    Updates out-distances as it goes.
-   If visible[j] is stale, then it set the current node to visible
+   If visible[j] is stale, then it sets the current node to visible
    (visible[j] is usually stale because of the join that created this node...)
 */
-void ResetVisible(/*IN/UPDATE*/NJ_t *NJ, int nActive,
+void ResetVisible(/*IN/UPDATE*/UPGMA_t *UPGMA, int nActive,
 		  /*IN*/besthit_t *tophitsNode,
 		  int nTopHits,
 		  /*IN/UPDATE*/besthit_t *visible);
@@ -581,26 +432,19 @@ void ResetVisible(/*IN/UPDATE*/NJ_t *NJ, int nActive,
    Ignores self-hits to iNode and "dead" hits to
    nodes that have parents.
 */
-besthit_t *UniqueBestHits(NJ_t *NJ, int iNode, besthit_t *combined, int nCombined, /*OUT*/int *nUniqueOut);
-
+besthit_t *UniqueBestHits(UPGMA_t *UPGMA, int iNode, besthit_t *combined, int nCombined, /*OUT*/int *nUniqueOut);
 
 int CompareHitsByCriterion(const void *c1, const void *c2);
 int CompareHitsByJ(const void *c1, const void *c2);
 
-int NGaps(NJ_t *NJ, int node);	/* only handles leaf sequences */
-
-int Sibling(NJ_t *NJ, int node); /* At root, no unique sibling so returns -1 */
+int NGaps(UPGMA_t *UPGMA, int node);	/* only handles leaf sequences */
 
 void *mymalloc(size_t sz);       /* Prints "Out of memory" and exits on failure */
 void *myfree(void *, size_t sz); /* Always returns NULL */
 
-double knuth_rand();		/* Random number between 0 and 1 */
-
 /* Like mymalloc; duplicates the input (returns NULL if given NULL) */
 void *mymemdup(void *data, size_t sz);
 void *myrealloc(void *data, size_t szOld, size_t szNew);
-
-double pnorm(double z);		/* Probability(value <=z)  */
 
 /* Hashtable functions */
 typedef struct
@@ -634,21 +478,14 @@ int main(int argc, char **argv) {
   char *matrixPrefix = NULL;
   distance_matrix_t *distance_matrix = NULL;
   bool make_matrix = false;
-  bool logdist = false;
 
   for (iArg = 1; iArg < argc; iArg++) {
     if (strcmp(argv[iArg],"-makematrix") == 0) {
       make_matrix = true;
-    } else if (strcmp(argv[iArg],"-logdist") == 0) {
-      logdist = true;
     } else if (strcmp(argv[iArg],"-verbose") == 0 && iArg < argc-1) {
       verbose = atoi(argv[++iArg]);
     } else if (strcmp(argv[iArg],"-quiet") == 0) {
       verbose = 0;
-    } else if (strcmp(argv[iArg],"-slow") == 0) {
-      slow = 1;
-    } else if (strcmp(argv[iArg],"-fastest") == 0) {
-      fastest = 1;
     } else if (strcmp(argv[iArg], "-matrix") == 0 && iArg < argc-1) {
       iArg++;
       matrixPrefix = argv[iArg];
@@ -656,13 +493,8 @@ int main(int argc, char **argv) {
       useMatrix = false;
     } else if (strcmp(argv[iArg], "-nt") == 0) {
       nCodes = 4;
-    } else if (strcmp(argv[iArg], "-nj") == 0) {
-      bionj = 0;
-    } else if (strcmp(argv[iArg], "-bionj") == 0) {
-      bionj = 1;
-    } else if (strcmp(argv[iArg], "-boot") == 0 && iArg < argc-1) {
-      iArg++;
-      nBootstrap = atoi(argv[iArg]);
+    } else if (strcmp(argv[iArg],"-balanced") == 0) {
+      balanced = 1;
     } else if (strcmp(argv[iArg],"-top") == 0) {
       if(tophitsMult < 0.01)
 	tophitsMult = 1.0;
@@ -713,31 +545,15 @@ int main(int argc, char **argv) {
 
   char *fileName = iArg == (argc-1) ?  argv[argc-1] : NULL;
 
-  if (slow && fastest) {
-    fprintf(stderr,"Cannot be both slow and fastest\n");
-    exit(1);
-  }
-  if (slow && tophitsMult > 0) {
-    tophitsMult = 0.0;
-  }
-  if (logdist && !make_matrix) {
-    fprintf(stderr,"Log-corrected distances are only supported for -makematrix not neighbor joining\n");
-    exit(1);
-  }
-
   if (verbose && !make_matrix) {		/* Report settings */
     char tophitString[100] = "no";
     if(tophitsMult>0) sprintf(tophitString,"%.2f*sqrtN close=%.2f refresh=%.2f",
 			      tophitsMult, tophitsClose, tophitsRefresh);
-    char supportString[100] = "max-norm";
-    if (nBootstrap>0) sprintf(supportString,"Boot %d",nBootstrap);
-    fprintf(stderr,"Alignment: %s\n%s distances: %s Method: %s Support: %s\nSearch: %s TopHits: %s\n",
+    fprintf(stderr,"Alignment: %s\nMethod: %s %s distances: %s TopHits: %s\n",
 	    fileName ? fileName : "(stdin)",
+	    balanced ? "WPGMA" : "UPGMA",
 	    nCodes == 20 ? "Amino acid" : "Nucleotide",
 	    matrixPrefix ? matrixPrefix : (useMatrix? "BLOSUM45 (default)" : "%different"),
-	    bionj ? "BIONJ" : "neighbor-joining" ,
-	    supportString,
-	    slow?"Exhaustive (slow)" : (fastest ? "Fastest" : "Normal (fast/relax)"),
 	    tophitString);
   }
 
@@ -808,18 +624,14 @@ int main(int argc, char **argv) {
 
   clock_t clock_start = clock();
   if (make_matrix) {
-    NJ_t *NJ = InitNJ(aln->seqs, aln->nSeq, aln->nPos, distance_matrix);
+    UPGMA_t *UPGMA = InitUPGMA(aln->seqs, aln->nSeq, aln->nPos, distance_matrix);
     printf("   %d\n",aln->nSeq);
     int i,j;
-    for(i = 0; i < NJ->nSeq; i++) {
+    for(i = 0; i < UPGMA->nSeq; i++) {
       printf("%s",aln->names[i]);
-      for (j = 0; j < NJ->nSeq; j++) {
+      for (j = 0; j < UPGMA->nSeq; j++) {
 	besthit_t hit;
-	SeqDist(NJ->profiles[i]->codes,NJ->profiles[j]->codes,NJ->nPos,NJ->distance_matrix,/*OUT*/&hit);
-	if(logdist) {
-	  hit.dist = hit.dist < 0.99 ? -1.3*log(1.0-hit.dist) : 3.0;
-	  if(hit.dist > 3.0) hit.dist = 3.0;
-	}
+	SeqDist(UPGMA->profiles[i]->codes,UPGMA->profiles[j]->codes,UPGMA->nPos,UPGMA->distance_matrix,/*OUT*/&hit);
 	printf(" %f", hit.dist);
       }
       printf("\n");
@@ -827,548 +639,281 @@ int main(int argc, char **argv) {
     exit(0);
   }
   /* else */
-  NJ_t *NJ = InitNJ(uniqueSeq, nUniqueSeq, aln->nPos, distance_matrix);
-  FastNJ(NJ);
+  UPGMA_t *UPGMA = InitUPGMA(uniqueSeq, nUniqueSeq, aln->nPos, distance_matrix);
+  FastUPGMA(UPGMA);
 
-  /* profile-frequencies for the "up-profiles" in ReliabilityNJ take only diameter(Tree)*L*a
-     space not N*L*a space, because we can free them as we go.
-     And up-profile by their nature tend to be complicated.
-     So save the profile-frequency counters now to exclude later results.
-  */
-#ifdef TRACK_MEMORY
-  long svProfileFreqAlloc = nProfileFreqAlloc;
-  long svProfileFreqAvoid = nProfileFreqAvoid;
-#endif
-
-  if(verbose>1) fprintf(stderr, "Topology done after %.2f sec -- computing support values\n",
-			(clock()-clock_start)/(double)CLOCKS_PER_SEC);
-  ReliabilityNJ(NJ);
   fflush(stderr);
-  PrintNJ(stdout, NJ, aln->names, uniqueFirst, nameNext);
+  PrintUPGMA(stdout, UPGMA, aln->names, uniqueFirst, nameNext);
   fflush(stdout);
   if(verbose) {
-    fprintf(stderr, "Unique sequences: %d/%d Bad splits: %ld/%d",
-	    NJ->nSeq, aln->nSeq,
-	    nSuboptimalSplits, NJ->nSeq >= 3 ? NJ->nSeq-3 : 0);
-    if(!slow) fprintf(stderr, " Hill-climb: %ld Update-best: %ld",
-		      nBetter, nVisibleReset);
-    fprintf(stderr,"\n");
+    fprintf(stderr, "Unique sequences: %d/%d\n",
+	    UPGMA->nSeq, aln->nSeq);
     if (nCloseUsed>0 || nRefreshTopHits>0)
       fprintf(stderr, "Top hits: close neighbors %ld/%d refreshes %ld\n",
-	      nCloseUsed, NJ->nSeq, nRefreshTopHits);
-    double dN2 = NJ->nSeq*(double)NJ->nSeq;
-    fprintf(stderr, "Time %.2f Distances per N*N: by-profile %.3f (out %.3f) by-leaf %.3f\n",
+	      nCloseUsed, UPGMA->nSeq, nRefreshTopHits);
+    double dN2 = UPGMA->nSeq*(double)UPGMA->nSeq;
+    fprintf(stderr, "Time %.2f Distances per N*N: by-profile %.3f by-leaf %.3f\n",
 	    (clock()-clock_start)/(double)CLOCKS_PER_SEC,
-	    profileOps/dN2, outprofileOps/dN2, seqOps/dN2);
-#ifdef TRACK_MEMORY
-    fprintf(stderr, "Memory: %.2f MB (%.1f byte/pos) ",
-	    maxmallocHeap/1.0e6, maxmallocHeap/(double)(aln->nSeq*(double)aln->nPos));
-    /* Only report numbers from before we do reliability estimates */
-    fprintf(stderr, "profile-freq-alloc %ld avoided %.2f%%\n", 
-	    svProfileFreqAlloc,
-	    svProfileFreqAvoid > 0 ?
-	    100.0*svProfileFreqAvoid/(double)(svProfileFreqAlloc+svProfileFreqAvoid)
-	    : 0);
-#endif
+	    profileOps/dN2, seqOps/dN2);
   }
   fflush(stderr);
+
+  /* Note that we do not free up memory for the alignment, the UPGMA object,
+     or the representation of unique sequences in uniqueFirst and nameNext
+  */
   exit(0);
 }
 
-NJ_t *InitNJ(char **sequences, int nSeq, int nPos,
+UPGMA_t *InitUPGMA(char **sequences, int nSeq, int nPos,
 	     /*OPTIONAL*/distance_matrix_t *distance_matrix) {
   int iNode;
 
-  NJ_t *NJ = (NJ_t*)mymalloc(sizeof(NJ_t));
-  NJ->root = -1; 		/* set at end of FastNJ() */
-  NJ->maxnode = NJ->nSeq = nSeq;
-  NJ->nPos = nPos;
-  NJ->maxnodes = 2*nSeq;
-  NJ->seqs = sequences;
-  NJ->distance_matrix = distance_matrix;
+  UPGMA_t *UPGMA = (UPGMA_t*)mymalloc(sizeof(UPGMA_t));
+  UPGMA->root = -1; 		/* set at end of FastUPGMA() */
+  UPGMA->maxnode = UPGMA->nSeq = nSeq;
+  UPGMA->nPos = nPos;
+  UPGMA->maxnodes = 2*nSeq;
+  UPGMA->seqs = sequences;
+  UPGMA->distance_matrix = distance_matrix;
 
-  NJ->profiles = (profile_t **)mymalloc(sizeof(profile_t*) * NJ->maxnodes);
+  UPGMA->profiles = (profile_t **)mymalloc(sizeof(profile_t*) * UPGMA->maxnodes);
 
-  for (iNode = 0; iNode < NJ->nSeq; iNode++) {
-    NJ->profiles[iNode] = SeqToProfile(NJ, NJ->seqs[iNode], nPos, iNode);
+  for (iNode = 0; iNode < UPGMA->nSeq; iNode++) {
+    UPGMA->profiles[iNode] = SeqToProfile(UPGMA, UPGMA->seqs[iNode], nPos, iNode);
   }
   if(verbose>10) fprintf(stderr,"Made sequence profiles\n");
-  for (iNode = NJ->nSeq; iNode < NJ->maxnodes; iNode++) 
-    NJ->profiles[iNode] = NULL; /* not yet exists */
+  for (iNode = UPGMA->nSeq; iNode < UPGMA->maxnodes; iNode++) 
+    UPGMA->profiles[iNode] = NULL; /* not yet exists */
 
-  NJ->outprofile = OutProfile(NJ->profiles, NJ->nSeq, NJ->nPos, NJ->distance_matrix);
+  UPGMA->outprofile = OutProfile(UPGMA->profiles, UPGMA->nSeq, UPGMA->nPos, UPGMA->distance_matrix);
   if(verbose>10) fprintf(stderr,"Made out-profile\n");
 
-  NJ->totdiam = 0.0;
+  UPGMA->parent = (int *)mymalloc(sizeof(int)*UPGMA->maxnodes);
+  for (iNode = 0; iNode < UPGMA->maxnodes; iNode++) UPGMA->parent[iNode] = -1;
 
-  NJ->diameter = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
-  for (iNode = 0; iNode < NJ->maxnodes; iNode++) NJ->diameter[iNode] = 0;
+  UPGMA->branchlength = (float *)mymalloc(sizeof(float)*UPGMA->maxnodes); /* distance to parent */
+  for (iNode = 0; iNode < UPGMA->maxnodes; iNode++) UPGMA->branchlength[iNode] = 0;
 
-  NJ->varDiameter = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
-  for (iNode = 0; iNode < NJ->maxnodes; iNode++) NJ->varDiameter[iNode] = 0;
+  UPGMA->child = (children_t*)mymalloc(sizeof(children_t)*UPGMA->maxnodes);
+  for (iNode= 0; iNode < UPGMA->maxnode; iNode++) UPGMA->child[iNode].nChild = 0;
 
-  NJ->selfdist = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
-  for (iNode = 0; iNode < NJ->maxnodes; iNode++) NJ->selfdist[iNode] = 0;
-
-  NJ->selfweight = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
-  for (iNode = 0; iNode < NJ->nSeq; iNode++)
-    NJ->selfweight[iNode] = NJ->nPos - NGaps(NJ,iNode);
-
-  NJ->outDistances = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
-  NJ->nOutDistActive = (int *)mymalloc(sizeof(int)*NJ->maxnodes);
-  for (iNode = 0; iNode < NJ->maxnodes; iNode++)
-    NJ->nOutDistActive[iNode] = NJ->nSeq * 2; /* unreasonably high value */
-  NJ->parent = NULL;		/* so SetOutDistance ignores it */
-  for (iNode = 0; iNode < NJ->nSeq; iNode++)
-    SetOutDistance(/*IN/UPDATE*/NJ, iNode, /*nActive*/NJ->nSeq);
-
-  if (verbose>2) {
-    for (iNode = 0; iNode < 4 && iNode < NJ->nSeq; iNode++)
-      fprintf(stderr, "Node %d outdist %f\n", iNode, NJ->outDistances[iNode]);
+  UPGMA->outDistances = (float*)mymalloc(sizeof(float)*UPGMA->maxnodes);
+  for (iNode = 0; iNode < UPGMA->nSeq; iNode++) {
+    besthit_t hit;
+    ProfileDist(UPGMA->outprofile, UPGMA->profiles[iNode], UPGMA->nPos, UPGMA->distance_matrix, &hit);
+    UPGMA->outDistances[iNode] = hit.dist;
   }
 
-  NJ->parent = (int *)mymalloc(sizeof(int)*NJ->maxnodes);
-  for (iNode = 0; iNode < NJ->maxnodes; iNode++) NJ->parent[iNode] = -1;
+  UPGMA->nodeHeight = (float*)mymalloc(sizeof(float)*UPGMA->maxnodes);
+  for (iNode = 0; iNode < UPGMA->maxnodes; iNode++)
+    UPGMA->nodeHeight[iNode] = 0;
 
-  NJ->branchlength = (float *)mymalloc(sizeof(float)*NJ->maxnodes); /* distance to parent */
-  for (iNode = 0; iNode < NJ->maxnodes; iNode++) NJ->branchlength[iNode] = 0;
-
-  NJ->support = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
-  for (iNode = 0; iNode < NJ->maxnodes; iNode++) NJ->support[iNode] = -1.0;
-
-  NJ->child = (children_t*)malloc(sizeof(children_t)*NJ->maxnodes);
-  for (iNode= 0; iNode < NJ->maxnode; iNode++) NJ->child[iNode].nChild = 0;
-
-  return(NJ);
+  UPGMA->nSize = (int*)mymalloc(sizeof(int)*UPGMA->maxnodes);
+  for (iNode = 0; iNode < UPGMA->nSeq; iNode++)
+    UPGMA->nSize[iNode] = 1;
+  return(UPGMA);
 }
 
-void FastNJ(NJ_t *NJ) {
+void FastUPGMA(UPGMA_t *UPGMA) {
   int iNode;
 
-  assert(NJ->nSeq >= 1);
-  if (NJ->nSeq < 3) {
-    NJ->root = NJ->maxnode++;
-    NJ->child[NJ->root].nChild = NJ->nSeq;
-    for (iNode = 0; iNode < NJ->nSeq; iNode++) {
-      NJ->parent[iNode] = NJ->root;
-      NJ->child[NJ->root].child[iNode] = iNode;
-    }
-    if (NJ->nSeq == 1) {
-      NJ->branchlength[0] = 0;
-    } else {
-      assert (NJ->nSeq == 2);
-      besthit_t hit;
-      SeqDist(NJ->profiles[0]->codes,NJ->profiles[1]->codes,NJ->nPos,NJ->distance_matrix,/*OUT*/&hit);
-      NJ->branchlength[0] = hit.dist/2.0;
-      NJ->branchlength[1] = hit.dist/2.0;
-    }
+  assert(UPGMA->nSeq >= 1);
+  if (UPGMA->nSeq == 1) {
+    UPGMA->root = UPGMA->maxnode++;
+    UPGMA->child[UPGMA->root].nChild = 1;
+    UPGMA->parent[0] = UPGMA->root;
+    UPGMA->child[UPGMA->root].child[0] = 0;
+    UPGMA->branchlength[0] = 0;
     return;
   }
 
-  /* else 3 or more sequences */
-
-  /* The visible set stores the best hit of each node */
-  besthit_t *visible = NULL;
-  besthit_t *besthitNew = NULL;	/* All hits of new node -- not used if doing top-hits */
+  /* else 2 or more sequences */
 
   /* The top-hits lists, with the key parameter m = length of each top-hit list */
   besthit_t **tophits = NULL;	/* Up to top m hits for each node; i and j are -1 if past end of list */
   int *tophitAge = NULL;	/* #Joins since list was refreshed, 1 value per node */
   int m = 0;			/* length of each list */
   if (tophitsMult > 0) {
-    m = (int)(0.5 + tophitsMult*sqrt(NJ->nSeq));
-    if(m<4 || 2*m >= NJ->nSeq) {
+    m = (int)(0.5 + tophitsMult*sqrt(UPGMA->nSeq));
+    if(m<4 || 2*m >= UPGMA->nSeq) {
       m=0;
       if(verbose>1) fprintf(stderr,"Too few leaves, turning off top-hits\n");
     } else {
-      if(verbose>2) fprintf(stderr,"Top-hit-list size = %d of %d\n", m, NJ->nSeq);
+      if(verbose>2) fprintf(stderr,"Top-hit-list size = %d of %d\n", m, UPGMA->nSeq);
     }
   }
-
-
-  assert(!(slow && m>0));
 
   if (m>0) {
-      tophits = (besthit_t**)mymalloc(sizeof(besthit_t*) * NJ->maxnodes);
-      for(iNode=0; iNode < NJ->maxnodes; iNode++) tophits[iNode] = NULL;
-      SetAllLeafTopHits(NJ, m, /*OUT*/tophits);
-      tophitAge = (int*)mymalloc(sizeof(int) * NJ->maxnodes);
-      for(iNode=0; iNode < NJ->maxnodes; iNode++) tophitAge[iNode] = 0;
-#ifdef TRACK_MEMORY
-      if (verbose>1) {
-	struct mallinfo mi = mallinfo();
-	fprintf(stderr, "Memory after SetAllLeafTopHits(): %.2f MB (%.1f byte/pos) useful %.2f\n",
-		(mi.arena+mi.hblkhd)/1.0e6, (mi.arena+mi.hblkhd)/(double)(NJ->nSeq*(double)NJ->nPos),
-		mi.uordblks/1.0e6);
-      }
-#endif
+      tophits = (besthit_t**)mymalloc(sizeof(besthit_t*) * UPGMA->maxnodes);
+      for(iNode=0; iNode < UPGMA->maxnodes; iNode++) tophits[iNode] = NULL;
+      SetAllLeafTopHits(UPGMA, m, /*OUT*/tophits);
+      tophitAge = (int*)mymalloc(sizeof(int) * UPGMA->maxnodes);
+      for(iNode=0; iNode < UPGMA->maxnodes; iNode++) tophitAge[iNode] = 0;
   }
 
-  /* Initialize visible set */
-  if (!slow) {
-    visible = (besthit_t*)mymalloc(sizeof(besthit_t)*NJ->maxnodes);
-    if(m==0) besthitNew = (besthit_t*)mymalloc(sizeof(besthit_t)*NJ->maxnodes);
-    for (iNode = 0; iNode < NJ->nSeq; iNode++) {
-      if (m>0)
-	visible[iNode] = tophits[iNode][GetBestFromTopHits(iNode, NJ, /*nActive*/NJ->nSeq, tophits[iNode], /*nTop*/m)];
-      else
-	SetBestHit(iNode, NJ, /*nActive*/NJ->nSeq, /*OUT*/&visible[iNode], /*OUT IGNORED*/NULL);
-    }
+  /* The visible set stores the best hit of each node */
+  besthit_t *visible = (besthit_t*)mymalloc(sizeof(besthit_t)*UPGMA->maxnodes);
+
+  for (iNode = 0; iNode < UPGMA->nSeq; iNode++) {
+    if (m>0)
+      visible[iNode] = tophits[iNode][GetBestFromTopHits(iNode, UPGMA,
+							 /*nActive*/UPGMA->nSeq, tophits[iNode], /*nTop*/m)];
+    else
+      SetBestHit(iNode, UPGMA, /*nActive*/UPGMA->nSeq, /*OUT*/&visible[iNode], /*OUT IGNORED*/NULL);
   }
+
+  besthit_t *besthitNew = NULL;	/* All hits of newnode. Not used with top-hits heuristic */
+  if (m==0)
+    besthitNew = (besthit_t*)mymalloc(sizeof(besthit_t)*UPGMA->maxnodes);
 
   /* Iterate over joins */
   int nActive;
-  for (nActive = NJ->nSeq; nActive > 3; nActive--) {
-    besthit_t join; 		/* the join to do */
-    if (slow) {
-      ExhaustiveNJSearch(NJ,nActive,/*OUT*/&join);
-    } else if (m>0) {
-      TopHitNJSearch(/*IN/OUT*/NJ, nActive, m, /*IN/OUT*/visible, /*IN/OUT*/tophits, /*OUT*/&join);
-    } else {
-      FastNJSearch(NJ, nActive, /*IN/OUT*/visible, /*OUT*/&join);
-    }
+  for (nActive = UPGMA->nSeq; nActive > 1; nActive--) {
 
-    /* because of the stale out-distance heuristic, make sure that these are up-to-date */
-    SetOutDistance(NJ, join.i, nActive);
-    SetOutDistance(NJ, join.j, nActive);
-    assert(NJ->nOutDistActive[join.i] == nActive);
-    assert(NJ->nOutDistActive[join.j] == nActive);
-
-    int newnode = NJ->maxnode++;
-    NJ->parent[join.i] = newnode;
-    NJ->parent[join.j] = newnode;
-    NJ->child[newnode].nChild = 2;
-    NJ->child[newnode].child[0] = join.i < join.j ? join.i : join.j;
-    NJ->child[newnode].child[1] = join.i > join.j ? join.i : join.j;
-
-    double rawIJ = join.dist + NJ->diameter[join.i] + NJ->diameter[join.j];
-    double distIJ = join.dist;
-
-    double deltaDist = (NJ->outDistances[join.i]-NJ->outDistances[join.j])/(double)(nActive-2);
-    NJ->branchlength[join.i] = (distIJ + deltaDist)/2;
-    NJ->branchlength[join.j] = (distIJ - deltaDist)/2;
-
-    double bionjWeight = 0.5;	/* IJ = bionjWeight*I + (1-bionjWeight)*J */
-    double varIJ = rawIJ - NJ->varDiameter[join.i] - NJ->varDiameter[join.j];
-
-    if (bionj && join.weight > 0 && varIJ > 0) {
-      /* Set bionjWeight according to the BIONJ formula, where
-	 the variance matrix is approximated by
-
-	 Vij = ProfileVar(i,j) - varDiameter(i) - varDiameter(j)
-	 ProfileVar(i,j) = distance(i,j) = top(i,j)/weight(i,j)
-
-	 (The node's distance diameter does not affect the variances.)
-
-	 The BIONJ formula is equation 9 from Gascuel 1997:
-
-	 bionjWeight = 1/2 + sum(k!=i,j) (Vjk - Vik) / ((nActive-2)*Vij)
-	 sum(k!=i,j) (Vjk - Vik) = sum(k!=i,j) Vik - varDiameter(j) + varDiameter(i)
-	 = sum(k!=i,j) ProfileVar(j,k) - sum(k!=i,j) ProfileVar(i,k) + (nActive-2)*(varDiameter(i)-varDiameter(j))
-
-	 sum(k!=i,j) ProfileVar(i,k)
-	 ~= (sum(k!=i,j) distance(i,k) * weight(i,k))/(mean(k!=i,j) weight(i,k))
-	 ~= (N-2) * top(i, Out-i-j) / weight(i, Out-i-j)
-
-	 weight(i, Out-i-j) = N*weight(i,Out) - weight(i,i) - weight(i,j)
-	 top(i, Out-i-j) = N*top(i,Out) - top(i,i) - top(i,j)
-      */
-      besthit_t outI;
-      besthit_t outJ;
-      ProfileDist(NJ->profiles[join.i],NJ->outprofile,NJ->nPos,NJ->distance_matrix,/*OUT*/&outI);
-      ProfileDist(NJ->profiles[join.j],NJ->outprofile,NJ->nPos,NJ->distance_matrix,/*OUT*/&outJ);
-      outprofileOps += 2;
-
-      double varIWeight = (nActive * outI.weight - NJ->selfweight[join.i] - join.weight);
-      double varJWeight = (nActive * outJ.weight - NJ->selfweight[join.j] - join.weight);
-
-      double varITop = outI.dist * outI.weight * nActive
-	- NJ->selfdist[join.i] * NJ->selfweight[join.i] - rawIJ * join.weight;
-      double varJTop = outJ.dist * outJ.weight * nActive
-	- NJ->selfdist[join.j] * NJ->selfweight[join.j] - rawIJ * join.weight;
-
-      double deltaProfileVarOut = (nActive-2) * (varJTop/varJWeight - varITop/varIWeight);
-      double deltaVarDiam = (nActive-2)*(NJ->varDiameter[join.i] - NJ->varDiameter[join.j]);
-      bionjWeight = 0.5 + (deltaProfileVarOut+deltaVarDiam)/(2*(nActive-2)*varIJ);
-      if(bionjWeight<0) bionjWeight=0;
-      if(bionjWeight>1) bionjWeight=1;
-      if (verbose>2) fprintf(stderr,"dVarO %f dVarDiam %f varIJ %f from dist %f weight %f (pos %d) bionjWeight %f %f\n",
-			     deltaProfileVarOut, deltaVarDiam,
-			     varIJ, join.dist, join.weight, NJ->nPos,
-			     bionjWeight, 1-bionjWeight);
-      if (verbose>3 && (newnode%5) == 0) {
-	/* Compare weight estimated from outprofiles from weight made by summing over other nodes */
-	double deltaProfileVarTot = 0;
-	for (iNode = 0; iNode < newnode; iNode++) {
-	  if (NJ->parent[iNode] < 0) { /* excludes join.i, join.j */
-	    besthit_t di, dj;
-	    ProfileDist(NJ->profiles[join.i],NJ->profiles[iNode],NJ->nPos,NJ->distance_matrix,/*OUT*/&di);
-	    ProfileDist(NJ->profiles[join.j],NJ->profiles[iNode],NJ->nPos,NJ->distance_matrix,/*OUT*/&dj);
-	    deltaProfileVarTot += dj.dist - di.dist;
-	  }
-	}
-	double lambdaTot = 0.5 + (deltaProfileVarTot+deltaVarDiam)/(2*(nActive-2)*varIJ);
-	if (lambdaTot < 0) lambdaTot = 0;
-	if (lambdaTot > 1) lambdaTot = 1;
-	if (fabs(bionjWeight-lambdaTot) > 0.01 || verbose > 4)
-	  fprintf(stderr, "deltaProfileVar actual %.6f estimated %.6f lambda actual %.3f estimated %.3f\n",
-		  deltaProfileVarTot,deltaProfileVarOut,lambdaTot,bionjWeight);
+    /* Find a candidate best hit by searching the visible set (O(N) time) */
+    double bestCriterion = 1e20;
+    int iBest = -1;
+    int iNode;
+    for (iNode = 0; iNode < UPGMA->maxnode; iNode++) {
+      if (UPGMA->parent[iNode] >= 0) continue;
+      int j = visible[iNode].j;
+      assert(j>=0);
+      if (UPGMA->parent[j] >= 0) continue;
+      if (visible[iNode].criterion < bestCriterion) {
+	iBest = iNode;
+	bestCriterion = visible[iNode].criterion;
       }
     }
-    if (verbose>1) fprintf(stderr, "Join\t%d\t%d\t%.6f\tlambda\t%.6f\tselfw\t%.3f\t%.3f\tnew\t%d\n",
+    assert(iBest>=0);
+
+    besthit_t join = visible[iBest]; /* the join to do */
+
+    /* Do local hill-climbing search */
+    int changed = 0;
+    do {
+      changed = 0;
+      assert(join.i >= 0 && join.i < UPGMA->maxnode);
+      assert(join.j >= 0 && join.j < UPGMA->maxnode);
+      assert(UPGMA->parent[join.i] < 0);
+      assert(UPGMA->parent[join.j] < 0);
+      assert(join.i != join.j);
+
+      besthit_t newjoin = join;
+      if (m==0)
+	SetBestHit(join.i, UPGMA, nActive, &newjoin, /*OUT IGNORED*/NULL);
+      else
+	newjoin = tophits[join.i][GetBestFromTopHits(join.i, UPGMA, nActive, tophits[join.i], m)];
+      assert(newjoin.i == join.i);
+      if (newjoin.criterion >= join.criterion) /* Verify that we got better! */
+	newjoin = join;
+      else if (newjoin.j != join.j)
+	changed = 1;
+
+      besthit_t newjoin2;
+      if (m==0)
+	SetBestHit(newjoin.j, UPGMA, nActive, &newjoin2, /*OUT IGNORED*/NULL);
+      else
+	newjoin2 = tophits[newjoin.j][GetBestFromTopHits(newjoin.j, UPGMA, nActive, tophits[newjoin.j], m)];
+      assert(newjoin2.i==newjoin.j);
+
+      if (newjoin2.criterion >= newjoin.criterion)
+	newjoin2 = newjoin;
+      else if (newjoin2.j != join.i)
+	changed = 1;
+      if(changed && verbose > 2)
+	fprintf(stderr,"Local search from %d %d to %d %d %.6f\n",
+		join.i, join.j, newjoin2.i, newjoin2.j, newjoin2.criterion);
+      join = newjoin2;
+    } while(changed);
+
+    assert(join.i >= 0 && join.i < UPGMA->maxnode);
+    assert(join.j >= 0 && join.j < UPGMA->maxnode);
+    assert(UPGMA->parent[join.i] < 0);
+    assert(UPGMA->parent[join.j] < 0);
+    assert(join.i != join.j);
+
+    /* Do the join */
+
+    int newnode = UPGMA->maxnode++;
+    UPGMA->parent[join.i] = newnode;
+    UPGMA->parent[join.j] = newnode;
+    UPGMA->child[newnode].nChild = 2;
+    UPGMA->child[newnode].child[0] = join.i < join.j ? join.i : join.j;
+    UPGMA->child[newnode].child[1] = join.i > join.j ? join.i : join.j;
+    UPGMA->nSize[newnode] = UPGMA->nSize[join.i] + UPGMA->nSize[join.j];
+
+    double weight1 = 0.5;
+    if (!balanced) {
+      weight1 = UPGMA->nSize[join.i]/(double)UPGMA->nSize[newnode];
+    }
+    UPGMA->profiles[newnode] = AverageProfile(UPGMA->profiles[join.i],UPGMA->profiles[join.j],UPGMA->nPos,
+					      UPGMA->distance_matrix,
+					      weight1);
+
+    /* Set the branch length */
+
+    UPGMA->nodeHeight[newnode] = join.dist/2;
+    UPGMA->branchlength[join.i] = join.dist/2 - UPGMA->nodeHeight[join.i];
+    UPGMA->branchlength[join.j] = join.dist/2 - UPGMA->nodeHeight[join.j];
+
+    if (verbose>1) fprintf(stderr, "Join\t%d\t%d\t%.6f\tweight\t%.6f\t%d\tnewheight\t%.6f\n",
 			   join.i < join.j ? join.i : join.j,
 			   join.i < join.j ? join.j : join.i,
-			   join.criterion, bionjWeight,
-			   NJ->selfweight[join.i < join.j ? join.i : join.j],
-			   NJ->selfweight[join.i < join.j ? join.j : join.i],
-			   newnode);
-    
-    NJ->diameter[newnode] = bionjWeight * (NJ->branchlength[join.i] + NJ->diameter[join.i])
-      + (1-bionjWeight) * (NJ->branchlength[join.j] + NJ->diameter[join.j]);
-    NJ->varDiameter[newnode] = bionjWeight * NJ->varDiameter[join.i]
-      + (1-bionjWeight) * NJ->varDiameter[join.j]
-      + bionjWeight * (1-bionjWeight) * varIJ;
+			   join.criterion,
+			   join.i < join.j ? weight1 : 1.0-weight1,
+			   newnode,
+			   UPGMA->nodeHeight[newnode]);
 
-    NJ->profiles[newnode] = AverageProfile(NJ->profiles[join.i],NJ->profiles[join.j],NJ->nPos,
-					   NJ->distance_matrix,
-					   bionj ? bionjWeight : /*noweight*/-1.0);
+    /* Update the visible set, either exhaustively or using top-hits */
+    if (nActive == 2)
+      continue; 		/* no work left */
 
-    /* Update out-distances and total diameters */
-    if (((NJ->nSeq - nActive + 1) % nRecomputeOutProfile) == 0) {
-      /* Recompute the outprofile from scratch to avoid roundoff error */
-      profile_t **activeProfiles = (profile_t**)mymalloc(sizeof(profile_t*)*(nActive-1));
-      int nSaved = 0;
-      NJ->totdiam = 0;
-      for (iNode=0;iNode<NJ->maxnode;iNode++) {
-	if (NJ->parent[iNode]<0) {
-	  assert(nSaved < nActive-1);
-	  activeProfiles[nSaved++] = NJ->profiles[iNode];
-	  NJ->totdiam += NJ->diameter[iNode];
-	}
-      }
-      assert(nSaved==nActive-1);
-      FreeProfile(NJ->outprofile,NJ->nPos);
-      if(verbose>1) fprintf(stderr,"Recomputing outprofile\n");
-      NJ->outprofile = OutProfile(activeProfiles, nSaved, NJ->nPos, NJ->distance_matrix);
-      activeProfiles = myfree(activeProfiles, sizeof(profile_t*)*(nActive-1));
-    } else {
-      UpdateOutProfile(/*OUT*/NJ->outprofile,
-		       NJ->profiles[join.i], NJ->profiles[join.j], NJ->profiles[newnode],
-		       nActive, NJ->nPos,
-		       NJ->distance_matrix);
-      NJ->totdiam += NJ->diameter[newnode] - NJ->diameter[join.i] - NJ->diameter[join.j];
-    }
-
-    /* Store self-dist for use in other computations */
-    besthit_t selfdist;
-    ProfileDist(NJ->profiles[newnode],NJ->profiles[newnode],NJ->nPos,NJ->distance_matrix,/*OUT*/&selfdist);
-    NJ->selfdist[newnode] = selfdist.dist;
-    NJ->selfweight[newnode] = selfdist.weight;
-
-    /* Find the best hit of the joined node IJ */
     if (m>0) {
-      TopHitJoin(/*IN/OUT*/NJ, newnode, nActive-1, m,
+      TopHitJoin(/*IN/OUT*/UPGMA, newnode, nActive-1, m,
 		 /*IN/OUT*/tophits, /*IN/OUT*/tophitAge,
 		 /*IN/OUT*/visible);
     } else {
-      /* Not using top-hits, so we update all out-distances */
-      for (iNode = 0; iNode < NJ->maxnode; iNode++) {
-	if (NJ->parent[iNode] < 0) {
-	  /* True nActive is now nActive-1 */
-	  SetOutDistance(/*IN/UPDATE*/NJ, iNode, nActive-1);
+      SetBestHit(newnode, UPGMA, nActive-1, /*OUT*/&visible[newnode], /*OUT*/besthitNew);
+      for (iNode = 0; iNode < UPGMA->maxnode; iNode++) {
+	if (iNode == newnode || UPGMA->parent[iNode] >= 0) continue;
+	assert(besthitNew[iNode].i == newnode && besthitNew[iNode].j == iNode);
+	assert(visible[iNode].i == iNode);
+	int iOldVisible = visible[iNode].j;
+	assert(iOldVisible >= 0);
+	if (UPGMA->parent[iOldVisible] >= 0
+	    || besthitNew[iNode].criterion < visible[iNode].criterion) {
+	  visible[iNode].j = newnode;
+	  visible[iNode].dist = besthitNew[iNode].dist;
+	  visible[iNode].criterion = besthitNew[iNode].criterion;
+	  if(verbose>2) fprintf(stderr,"Revert best hit of %d to %d %.6f\n",
+				iNode,newnode,visible[iNode].criterion);
 	}
-      }
-    
-      if(visible != NULL) {
-	SetBestHit(newnode, NJ, nActive-1, /*OUT*/&visible[newnode], /*OUT OPTIONAL*/besthitNew);
-	if (verbose>2)
-	  fprintf(stderr,"Visible %d %d %f %f\n",
-		  visible[newnode].i, visible[newnode].j,
-		  visible[newnode].dist, visible[newnode].criterion);
-	if (besthitNew != NULL) {
-	  /* Use distances to new node to update visible set entries that are non-optimal */
-	  for (iNode = 0; iNode < NJ->maxnode; iNode++) {
-	    if (NJ->parent[iNode] >= 0 || iNode == newnode)
-	      continue;
-	    int iOldVisible = visible[iNode].j;
-	    assert(iOldVisible>=0);
-	    assert(visible[iNode].i == iNode);
-	      
-	    /* Update the criterion; use nActive-1 because haven't decremented nActive yet */
-	    if (NJ->parent[iOldVisible] < 0)
-	      SetCriterion(/*IN/OUT*/NJ, nActive-1, &visible[iNode]);
-	    
-	    if (NJ->parent[iOldVisible] >= 0
-		|| besthitNew[iNode].criterion < visible[iNode].criterion) {
-	      if(verbose>3) fprintf(stderr,"Visible %d reset from %d to %d (%f vs. %f)\n",
-				     iNode, iOldVisible, 
-				     newnode, visible[iNode].criterion, besthitNew[iNode].criterion);
-	      if(NJ->parent[iOldVisible] < 0) nVisibleReset++;
-	      visible[iNode].j = newnode;
-	      visible[iNode].dist = besthitNew[iNode].dist;
-	      visible[iNode].criterion = besthitNew[iNode].criterion;
-	    }
-	  } /* end loop over all nodes */
-	} /* end if recording all hits of new node */
-      } /* end if keeping a visible set */
-    } /* end else (m==0) */
+      } /* end loop over nodes to revert */
+    } /* end if m==0 */
   } /* end loop over nActive */
 
-#ifdef TRACK_MEMORY
-  if (verbose>1) {
-    struct mallinfo mi = mallinfo();
-    fprintf(stderr, "Memory @ end of FastNJ(): %.2f MB (%.1f byte/pos) useful %.2f expected %.2f\n",
-	    (mi.arena+mi.hblkhd)/1.0e6, (mi.arena+mi.hblkhd)/(double)(NJ->nSeq*(double)NJ->nPos),
-	    mi.uordblks/1.0e6, mymallocUsed/1e6);
-  }
-#endif
+  /* Last remaining node is the root */
+  assert(nActive==1);
+  UPGMA->root = UPGMA->maxnode-1;
 
-  /* We no longer need the tophits, visible set, etc. */
-  if (visible != NULL) visible = myfree(visible,sizeof(besthit_t)*NJ->maxnodes);
-  if (besthitNew != NULL) besthitNew = myfree(besthitNew,sizeof(besthit_t)*NJ->maxnodes);
+  /* Free allocated arrays */
+  visible = myfree(visible,sizeof(besthit_t)*UPGMA->maxnodes);
   if (tophits != NULL) {
-    for (iNode = 0; iNode < NJ->maxnode; iNode++) {
+    for (iNode = 0; iNode < UPGMA->maxnode; iNode++) {
       if (tophits[iNode] != NULL)
 	tophits[iNode] = myfree(tophits[iNode],sizeof(besthit_t)*m);
     }
-    tophits = myfree(tophits, sizeof(besthit_t*)*NJ->maxnodes);
-    tophitAge = myfree(tophitAge,sizeof(int)*NJ->maxnodes);
+    tophits = myfree(tophits, sizeof(besthit_t*)*UPGMA->maxnodes);
+    tophitAge = myfree(tophitAge,sizeof(int)*UPGMA->maxnodes);
   }
+  if(besthitNew != NULL)
+    besthitNew = myfree(besthitNew,sizeof(besthit_t)*UPGMA->maxnodes);
 
-  /* Add a root for the 3 remaining nodes */
-  int top[3];
-  int nTop = 0;
-  for (iNode = 0; iNode < NJ->maxnode; iNode++) {
-    if (NJ->parent[iNode] < 0) {
-      assert(nTop <= 2);
-      top[nTop++] = iNode;
-    }
-  }
-  assert(nTop==3);
-  
-  NJ->root = NJ->maxnode++;
-  NJ->child[NJ->root].nChild = 3;
-  for (nTop = 0; nTop < 3; nTop++) {
-    NJ->parent[top[nTop]] = NJ->root;
-    NJ->child[NJ->root].child[nTop] = top[nTop];
-  }
-
-  besthit_t dist01, dist02, dist12;
-  ProfileDist(NJ->profiles[top[0]], NJ->profiles[top[1]], NJ->nPos, NJ->distance_matrix, /*OUT*/&dist01);
-  ProfileDist(NJ->profiles[top[0]], NJ->profiles[top[2]], NJ->nPos, NJ->distance_matrix, /*OUT*/&dist02);
-  ProfileDist(NJ->profiles[top[1]], NJ->profiles[top[2]], NJ->nPos, NJ->distance_matrix, /*OUT*/&dist12);
-
-  double d01 = dist01.dist - NJ->diameter[top[0]] - NJ->diameter[top[1]];
-  double d02 = dist02.dist - NJ->diameter[top[0]] - NJ->diameter[top[2]];
-  double d12 = dist12.dist - NJ->diameter[top[1]] - NJ->diameter[top[2]];
-  NJ->branchlength[top[0]] = (d01 + d02 - d12)/2;
-  NJ->branchlength[top[1]] = (d01 + d12 - d02)/2;
-  NJ->branchlength[top[2]] = (d02 + d12 - d01)/2;
-
-  /* Check how accurate the outprofile is */
-  if (verbose>1) {
-    profile_t *p[3] = {NJ->profiles[top[0]], NJ->profiles[top[1]], NJ->profiles[top[2]]};
-    profile_t *out = OutProfile(p, 3, NJ->nPos, NJ->distance_matrix);
-    int i;
-    double freqerror = 0;
-    double weighterror = 0;
-    for (i=0;i<NJ->nPos;i++) {
-      weighterror += fabs(out->weights[i] - NJ->outprofile->weights[i]);
-      int k;
-      for(k=0;k<nCodes;k++)
-	freqerror += fabs(out->vectors[nCodes*i+k] - NJ->outprofile->vectors[nCodes*i+k]);
-    }
-    fprintf(stderr,"Roundoff error in outprofile@end: WeightError %f FreqError %f\n", weighterror, freqerror);
-    FreeProfile(out,NJ->nPos);
-  }
   return;
 }
 
-void ExhaustiveNJSearch(NJ_t *NJ, int nActive, /*OUT*/besthit_t *join) {
-  join->i = -1;
-  join->j = -1;
-  join->weight = 0;
-  join->dist = 1e20;
-  join->criterion = 1e20;
-  double bestCriterion = 1e20;
-
-  int i, j;
-  for (i = 0; i < NJ->maxnode-1; i++) {
-    if (NJ->parent[i] < 0) {
-      for (j = i+1; j < NJ->maxnode; j++) {
-	if (NJ->parent[j] < 0) {
-	  besthit_t hit;
-	  hit.i = i;
-	  hit.j = j;
-	  SetDistCriterion(NJ, nActive, /*IN/OUT*/&hit);
-	  if (hit.criterion < bestCriterion) {
-	    *join = hit;
-	    bestCriterion = hit.criterion;
-	  }
-	}
-      }
-    }
-  }
-  assert (join->i >= 0 && join->j >= 0);
-}
-
-void FastNJSearch(NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *besthits, /*OUT*/besthit_t *join) {
-  join->i = -1;
-  join->j = -1;
-  join->dist = 1e20;
-  join->weight = 0;
-  join->criterion = 1e20;
-  int iNode;
-  for (iNode = 0; iNode < NJ->maxnode; iNode++) {
-    int jNode = besthits[iNode].j;
-    if (NJ->parent[iNode] < 0 && NJ->parent[jNode] < 0) { /* both i and j still active */
-      /* recompute criterion to reflect the current out-distances */
-      SetCriterion(NJ, nActive, /*IN/OUT*/&besthits[iNode]);
-      if (besthits[iNode].criterion < join->criterion)
-	*join = besthits[iNode];      
-    }
-  }
-
-  if(!fastest) {
-    int changed;
-    do {
-      changed = 0;
-      assert(join->i >= 0 && join->j >= 0);
-      SetBestHit(join->i, NJ, nActive, /*OUT*/&besthits[join->i], /*OUT IGNORED*/NULL);
-      if (besthits[join->i].j != join->j) {
-	changed = 1;
-	if (verbose>2)
-	  fprintf(stderr,"BetterI\t%d\t%d\t%d\t%d\t%f\t%f\n",
-		  join->i,join->j,besthits[join->i].i,besthits[join->i].j,
-		  join->criterion,besthits[join->i].criterion);
-      }
-      
-      // Save the best hit either way, because the out-distance has probably changed
-      // since we started the computation.
-      join->j = besthits[join->i].j;
-      join->weight = besthits[join->i].weight;
-      join->dist = besthits[join->i].dist;
-      join->criterion = besthits[join->i].criterion;
-      
-      SetBestHit(join->j, NJ, nActive, /*OUT*/&besthits[join->j], /*OUT IGNORE*/NULL);
-      if (besthits[join->j].j != join->i) {
-	changed = 1;
-	if (verbose>2)
-	  fprintf(stderr,"BetterJ\t%d\t%d\t%d\t%d\t%f\t%f\n",
-		  join->i,join->j,besthits[join->j].i,besthits[join->j].j,
-		  join->criterion,besthits[join->j].criterion);
-	join->i = besthits[join->j].j;
-	join->weight = besthits[join->j].weight;
-	join->dist = besthits[join->j].dist;
-	join->criterion = besthits[join->j].criterion;
-      }
-      if(changed) nBetter++;
-    } while(changed);
-  }
-}
-
-void PrintNJ(FILE *fp, NJ_t *NJ, char **names,
-	     int *uniqueFirst,  /* index in NJ to first index in names */
+void PrintUPGMA(FILE *fp, UPGMA_t *UPGMA, char **names,
+	     int *uniqueFirst,  /* index in UPGMA to first index in names */
 	     int *nameNext	/* index in names to next index in names or -1 */
 	     ) {
   /* And print the tree: depth first search
@@ -1376,7 +921,7 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names,
    * list of remaining children with their depth
    * parent node, with a flag of -1 so I know to print right-paren
    */
-  if (NJ->nSeq==1 && nameNext[uniqueFirst[0]] >= 0) {
+  if (UPGMA->nSeq==1 && nameNext[uniqueFirst[0]] >= 0) {
     /* Special case -- otherwise we end up with double parens */
     int first = uniqueFirst[0];
     fprintf(fp,"(%s:0.0",names[first]);
@@ -1390,9 +935,9 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names,
   }
 
   typedef struct { int node; int end; } stack_t;
-  stack_t *stack = (stack_t *)malloc(sizeof(stack_t)*NJ->maxnodes);
+  stack_t *stack = (stack_t *)malloc(sizeof(stack_t)*UPGMA->maxnodes);
   int stackSize = 1;
-  stack[0].node = NJ->root;
+  stack[0].node = UPGMA->root;
   stack[0].end = 0;
 
   while(stackSize>0) {
@@ -1402,8 +947,8 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names,
     int node = last->node;
     int end = last->end;
 
-    if (node < NJ->nSeq) {
-      if (NJ->child[NJ->parent[node]].child[0] != node) fputs(",",fp);
+    if (node < UPGMA->nSeq) {
+      if (UPGMA->child[UPGMA->parent[node]].child[0] != node) fputs(",",fp);
       int first = uniqueFirst[node];
       assert(first >= 0);
       /* Print the name, or the subtree of duplicate names */
@@ -1419,17 +964,17 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names,
 	fprintf(fp,")");
       }
       /* Print the branch length */
-      fprintf(fp, ":%.5f", NJ->branchlength[node]);
+      fprintf(fp, ":%.5f", UPGMA->branchlength[node]);
     } else if (end) {
-      if (node == NJ->root) fprintf(fp, ")");
-      else fprintf(fp, ")%.3f:%.5f", NJ->support[node], NJ->branchlength[node]);
+      if (node == UPGMA->root) fprintf(fp, ")");
+      else fprintf(fp, "):%.5f", UPGMA->branchlength[node]);
     } else {
-      if (node != NJ->root && NJ->child[NJ->parent[node]].child[0] != node) fprintf(fp, ",");
+      if (node != UPGMA->root && UPGMA->child[UPGMA->parent[node]].child[0] != node) fprintf(fp, ",");
       fprintf(fp, "(");
       stackSize++;
       stack[stackSize-1].node = node;
       stack[stackSize-1].end = 1;
-      children_t *c = &NJ->child[node];
+      children_t *c = &UPGMA->child[node];
       // put children on in reverse order because we use the last one first
       int i;
       for (i = c->nChild-1; i >=0; i--) {
@@ -1440,7 +985,7 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names,
     }
   }
   fprintf(fp, ";\n");
-  stack = myfree(stack, sizeof(stack_t)*NJ->maxnodes);
+  stack = myfree(stack, sizeof(stack_t)*UPGMA->maxnodes);
 }
 
 alignment_t *ReadAlignment(/*IN*/char *filename) {
@@ -1660,7 +1205,7 @@ alignment_t *ReadAlignment(/*IN*/char *filename) {
 }
 
 
-profile_t *SeqToProfile(NJ_t *NJ, char *seq, int nPos, int iNode) {
+profile_t *SeqToProfile(UPGMA_t *UPGMA, char *seq, int nPos, int iNode) {
   static unsigned char charToCode[256];
   static int codeSet = 0;
   int c, i;
@@ -1843,23 +1388,19 @@ void AddToFreq(/*IN/OUT*/float *fOut,
   }
 }
 
-/* bionjWeight is the weight of the first sequence (between 0 and 1),
-   or -1 to do the average.
-   */
+/* The returned profile is weight1 * profile1 + (1-weight1) * profile2 */
 profile_t *AverageProfile(profile_t *profile1, profile_t *profile2, int nPos,
 			  distance_matrix_t *dmat,
-			  double bionjWeight) {
+			  double weight1) {
   int i;
-  if (bionjWeight < 0) {
-    bionjWeight = 0.5;
-  }
+  double weight2 = 1.0-weight1;
+  assert(weight1 > 0 && weight2 > 0);
 
   /* First, set codes and weights and see how big vectors will be */
   profile_t *out = NewProfile(nPos);
 
   for (i = 0; i < nPos; i++) {
-    out->weights[i] = bionjWeight * profile1->weights[i]
-      + (1-bionjWeight) * profile2->weights[i];
+    out->weights[i] = weight1 * profile1->weights[i] + weight2 * profile2->weights[i];
     out->codes[i] = NOCODE;
     if (out->weights[i] > 0) {
       if (profile1->weights[i] > 0 && profile1->codes[i] != NOCODE
@@ -1888,16 +1429,16 @@ profile_t *AverageProfile(profile_t *profile1, profile_t *profile2, int nPos,
     float *f2 = GET_FREQ(profile2,i,/*IN/OUT*/iFreq2);
     if (f != NULL) {
       if (profile1->weights[i] > 0)
-	AddToFreq(/*IN/OUT*/f, profile1->weights[i] * bionjWeight,
+	AddToFreq(/*IN/OUT*/f, profile1->weights[i] * weight1,
 		  profile1->codes[i], f1, dmat);
       if (profile2->weights[i] > 0)
-	AddToFreq(/*IN/OUT*/f, profile2->weights[i] * (1.0-bionjWeight),
+	AddToFreq(/*IN/OUT*/f, profile2->weights[i] * weight2,
 		  profile2->codes[i], f2, dmat);
       NormalizeFreq(/*IN/OUT*/f, dmat);
     } /* end if computing f */
     if (verbose > 10 && i < 5) {
-      fprintf(stderr,"Average profiles: pos %d in-w1 %f in-w2 %f bionjWeight %f to weight %f code %d\n",
-	      i, profile1->weights[i], profile2->weights[i], bionjWeight,
+      fprintf(stderr,"Average profiles: pos %d in-w1 %f in-w2 %f to weight %f code %d\n",
+	      i, profile1->weights[i], profile2->weights[i],
 	      out->weights[i], out->codes[i]);
       if (f!= NULL) {
 	int k;
@@ -1991,61 +1532,6 @@ profile_t *OutProfile(profile_t **profiles, int nProfiles, int nPos,
   return(out);
 }
 
-void UpdateOutProfile(/*IN/OUT*/profile_t *out, profile_t *old1, profile_t *old2,
-		      profile_t *new, int nActiveOld, int nPos,
-		      distance_matrix_t *dmat) {
-  int i, k;
-  int iFreqOut = 0;
-  int iFreq1 = 0;
-  int iFreq2 = 0;
-  int iFreqNew = 0;
-  assert(nActiveOld > 0);
-
-  for (i = 0; i < nPos; i++) {
-    float *fOut = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
-    float *fOld1 = GET_FREQ(old1,i,/*IN/OUT*/iFreq1);
-    float *fOld2 = GET_FREQ(old2,i,/*IN/OUT*/iFreq2);
-    float *fNew = GET_FREQ(new,i,/*IN/OUT*/iFreqNew);
-
-    assert(out->codes[i] == NOCODE && fOut != NULL); /* No no-vector optimization for outprofiles */
-    if (verbose > 2 && i < 3) {
-      fprintf(stderr,"Updating out-profile position %d weight %f (mult %f)\n",
-	      i, out->weights[i], out->weights[i]*nActiveOld);
-    }
-    double originalMult = out->weights[i]*nActiveOld;
-    double newMult = originalMult + new->weights[i] - old1->weights[i] - old2->weights[i];
-    out->weights[i] = newMult/(nActiveOld-1);
-    if (out->weights[i] <= 0) out->weights[i] = 1e-20; /* always use the vector */
-
-    for (k = 0; k < nCodes; k++) fOut[k] *= originalMult;
-    
-    if (old1->weights[i] > 0)
-      AddToFreq(/*IN/OUT*/fOut, -old1->weights[i], old1->codes[i], fOld1, dmat);
-    if (old2->weights[i] > 0)
-      AddToFreq(/*IN/OUT*/fOut, -old2->weights[i], old2->codes[i], fOld2, dmat);
-    if (new->weights[i] > 0)
-      AddToFreq(/*IN/OUT*/fOut, new->weights[i], new->codes[i], fNew, dmat);
-
-    /* And renormalize */
-    NormalizeFreq(/*IN/OUT*/fOut, dmat);
-
-    if (verbose > 2 && i < 3) {
-      fprintf(stderr,"Updated out-profile position %d weight %f (mult %f)",
-	      i, out->weights[i], out->weights[i]*nActiveOld);
-      if(out->weights[i] > 0)
-	for (k=0;k<nCodes;k++)
-	  fprintf(stderr, " %c:%f", dmat?'?':codesString[k], fOut[k]);
-      fprintf(stderr,"\n");
-    }
-  }
-  assert(iFreqOut == out->nVectors);
-  assert(iFreq1 == old1->nVectors);
-  assert(iFreq2 == old2->nVectors);
-  assert(iFreqNew == new->nVectors);
-  if(dmat)
-    SetCodeDist(/*IN/OUT*/out,nPos,dmat);
-}
-
 void SetCodeDist(/*IN/OUT*/profile_t *profile, int nPos,
 			   distance_matrix_t *dmat) {
   if (profile->codeDist == NULL)
@@ -2065,9 +1551,9 @@ void SetCodeDist(/*IN/OUT*/profile_t *profile, int nPos,
 }
 
 
-void SetBestHit(int node, NJ_t *NJ, int nActive,
+void SetBestHit(int node, UPGMA_t *UPGMA, int nActive,
 		/*OUT*/besthit_t *bestjoin, /*OUT OPTIONAL*/besthit_t *allhits) {
-  assert(NJ->parent[node] <  0);
+  assert(UPGMA->parent[node] <  0);
 
   bestjoin->i = node;
   bestjoin->j = -1;
@@ -2077,11 +1563,11 @@ void SetBestHit(int node, NJ_t *NJ, int nActive,
   int j;
   besthit_t tmp;
 
-  for (j = 0; j < NJ->maxnode; j++) {
+  for (j = 0; j < UPGMA->maxnode; j++) {
     besthit_t *sv = allhits != NULL ? &allhits[j] : &tmp;
     sv->i = node;
     sv->j = j;
-    if (NJ->parent[j] >= 0) {
+    if (UPGMA->parent[j] >= 0) {
       sv->weight = 0.0;
       sv->criterion = sv->dist = 1e20;
       continue;
@@ -2090,11 +1576,11 @@ void SetBestHit(int node, NJ_t *NJ, int nActive,
        expects self to be within its top hits, but we exclude those from the bestjoin
        that we return...
     */
-    SetDistCriterion(NJ, nActive, /*IN/OUT*/sv);
+    SetDistCriterion(UPGMA, nActive, /*IN/OUT*/sv);
     if (sv->criterion < bestjoin->criterion && node != j)
       *bestjoin = *sv;
   }
-  if (verbose>5) {
+  if (verbose>2) {
     fprintf(stderr, "SetBestHit %d %d %f %f\n", bestjoin->i, bestjoin->j, bestjoin->dist, bestjoin->criterion);
   }
 }
@@ -2244,124 +1730,6 @@ void SetupDistanceMatrix(/*IN/OUT*/distance_matrix_t *dmat) {
   if(verbose>10) fprintf(stderr, "Made codeFreq\n");
 }
 
-void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ) {
-  /* For each non-root node N, with children A,B, parent P, sibling C, and grandparent G,
-     we test the reliability of the split (A,B) versus rest by comparing the profiles
-     of A, B, C, and the "up-profile" of P.
-
-     Each node's upProfile is the average of its sibling's (down)-profile + its parent's up-profile
-     (If node's parent is the root, then there are two siblings and we don't need an up-profile)
-
-     To save memory, we do depth-first-search down from the root, and we only keep
-     up-profiles for nodes in the active path.
-  */
-  int iChild;
-  int i;
-
-  if (NJ->nSeq <= 3)
-    return;			/* nothing to do */
-
-  int *path = (int*)mymalloc(sizeof(int)*NJ->maxnodes);
-  int path_size = 0;
-  int *work = (int*)mymalloc(sizeof(int)*NJ->maxnodes);
-  int work_size = 0;
-
-  /* For each node the upProfile, but we keep these as NULL for non-active nodes */
-  profile_t **upProfiles = (profile_t**)mymalloc(sizeof(profile_t*)*NJ->maxnodes);
-  for (i=0; i<NJ->maxnodes; i++) upProfiles[i] = NULL;
-
-  /* Start with children of root, and with path as just the root */
-  for (iChild = 0; iChild < NJ->child[NJ->root].nChild; iChild++) {
-    work[work_size++] = NJ->child[NJ->root].child[iChild];
-    if(verbose>10) fprintf(stderr,"Add to work %d\n",work[work_size-1]);
-  }
-  path[path_size++] = NJ->root;
-  if(verbose>10) fprintf(stderr,"Add to path %d\n",path[path_size-1]);
-
-  while(work_size>0) {
-    int node = work[--work_size];
-    int parent = NJ->parent[node];
-    int child1,child2;
-
-    if (node < NJ->nSeq) {
-      if(verbose>10) fprintf(stderr,"Skipping leaf %d\n", node);
-      continue;			/* for leaves, nothing to do */
-    }
-
-    /* last position in path should be parent */
-    while(path[path_size-1] != NJ->parent[node]) {
-      /* Forget profile of parent */
-      int old = path[--path_size];
-      upProfiles[old] = FreeProfile(upProfiles[old], NJ->nPos);
-      if(verbose>10) fprintf(stderr,"Free upprofile %d\n",old);
-      assert(path_size >= 1);
-    }
-
-    /* record child1,child2 -- these give 2 of our 4 profiles */
-    assert(NJ->child[node].nChild==2);
-    child1 = NJ->child[node].child[0];
-    child2 = NJ->child[node].child[1];
-
-    assert(upProfiles[node] == NULL);
-
-    /* get the other 2 profiles */
-    profile_t *outprofiles[2];
-    if (parent == NJ->root) {
-      int nSibs = 0;
-      int sibs[3];
-      for(iChild=0;iChild<NJ->child[NJ->root].nChild;iChild++) {
-	int child = NJ->child[NJ->root].child[iChild];
-	if (child != node) sibs[nSibs++] = child;
-      }
-      assert(nSibs==2);
-      outprofiles[0] = NJ->profiles[sibs[0]];
-      outprofiles[1] = NJ->profiles[sibs[1]];
-      if(verbose>10) fprintf(stderr,"outprofiles for node %d -- %d %d (2 sibs)\n",node,sibs[0],sibs[1]);
-    } else {
-      int sibling = Sibling(NJ,node);
-      assert(sibling>=0);
-      assert(upProfiles[parent] != NULL);
-      outprofiles[0] = upProfiles[parent];
-      outprofiles[1] = NJ->profiles[sibling];
-      if(verbose>10) fprintf(stderr,"outprofiles for node %d -- %d %d (parent & sibling)\n",node,parent,sibling);
-    }
-
-    /* Given our 4 profiles, compute support values and save
-       average of the outprofiles in upProfiles
-    */
-    if(verbose>2) fprintf(stderr,"SplitSupport for %d\n",node);
-    NJ->support[node] = SplitSupport(NJ->profiles[child1],
-				     NJ->profiles[child2],
-				     outprofiles[0],
-				     outprofiles[1],
-				     NJ->distance_matrix,
-				     NJ->nPos);
-    upProfiles[node] = AverageProfile(outprofiles[0], outprofiles[1], NJ->nPos,
-				      NJ->distance_matrix,
-				      /*no-weight*/-1.0);
-
-    if(verbose>10) fprintf(stderr, "Set upprofile %d\n", node);
-
-    /* Add children to work and add self to path */
-    for(iChild=0;iChild<NJ->child[node].nChild;iChild++) {
-      work[work_size++] = NJ->child[node].child[iChild];
-      if(verbose>10) fprintf(stderr, "Add to work %d\n", work[work_size-1]);
-    }
-    path[path_size++] = node;
-    if(verbose>10) fprintf(stderr, "Add to path %d\n", path[path_size-1]);
-  }
-
-  while(path_size>0) {
-    int node = path[--path_size];
-    upProfiles[node] = FreeProfile(upProfiles[node],NJ->nPos);
-    if(verbose>10) fprintf(stderr, "Free upprofile %d (cleaning up path)\n", node);
-  }
-  for(i=0;i<NJ->maxnodes;i++) assert(upProfiles[i]==NULL);
-  upProfiles = myfree(upProfiles, sizeof(profile_t*)*NJ->maxnodes);
-  path = myfree(path, sizeof(int)*NJ->maxnodes);
-  work = myfree(work, sizeof(int)*NJ->maxnodes);
-}
-
 profile_t *NewProfile(int nPos) {
   profile_t *profile = (profile_t *)mymalloc(sizeof(profile_t));
   profile->weights = mymalloc(sizeof(float)*nPos);
@@ -2381,333 +1749,76 @@ profile_t *FreeProfile(profile_t *profile, int nPos) {
     return(myfree(profile, sizeof(profile_t)));
 }
 
-int Sibling(NJ_t *NJ, int node) {
-  int parent = NJ->parent[node];
-  int iChild;
-  if(parent==NJ->root) return(-1);
-  for(iChild=0;iChild<NJ->child[parent].nChild;iChild++) {
-    if(NJ->child[parent].child[iChild] != node)
-      return (NJ->child[parent].child[iChild]);
-  }
-  assert(0);
-  return(-1);
-}
-
-/* Computes support for (A,B),(C,D) compared to that for (A,C),(B,D) and (A,D),(B,C) */
-double SplitSupport(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
-		    /*OPTIONAL*/distance_matrix_t *dmat,
-		    int nPos) {
-  /* Support1 = Support(AB|CD over AC|BD) = d(A,C)+d(B,D)-d(A,B)-d(C,D)
-     We keep track of sum, sumsq, and total weight
-     Note sums are weighted by weight
-
-     Support2 = Support(AB|CD over AD|BC) = d(A,D)+d(B,C)-d(A,B)-d(C,D)
-
-     m1 is mean(Support1) and s1 is standard deviation of Support1
-     cor12 is the correlation between Support1 and Support2
-  */
-  int i;
-  double support1sum, support1sumsq, m1, s1;
-  double support2sum, support2sumsq, m2, s2;
-  double support12sum, cor12;
-  double meanMin, sdMin, actualMin, actualZ, support;
-  /* If we are doing local bootstrap */
-  double *support1 = NULL;
-  double *support2 = NULL;
-  if (nBootstrap > 0) {
-    support1 = (double*)mymalloc(sizeof(double)*nPos);
-    support2 = (double*)mymalloc(sizeof(double)*nPos);
-  }
-
-  double total_weight = 0;
-  double total_weight_sq = 0;
-  support1sum = 0;
-  support2sum = 0;
-  support1sumsq = 0;
-  support2sumsq = 0;
-  support12sum = 0;
-
-  int iFreqA = 0;
-  int iFreqB = 0;
-  int iFreqC = 0;
-  int iFreqD = 0;
-  for (i = 0; i < nPos; i++) {
-    float *fA = GET_FREQ(pA, i, /*IN/OUT*/iFreqA);
-    float *fB = GET_FREQ(pB, i, /*IN/OUT*/iFreqB);
-    float *fC = GET_FREQ(pC, i, /*IN/OUT*/iFreqC);
-    float *fD = GET_FREQ(pD, i, /*IN/OUT*/iFreqD);
-    double support1piece = 0;
-    double support2piece = 0;
-
-    double weight = pA->weights[i];
-    if(pB->weights[i] < weight) weight = pB->weights[i];
-    if(pC->weights[i] < weight) weight = pC->weights[i];
-    if(pD->weights[i] < weight) weight = pD->weights[i];
-
-    if (weight > 0) {
-      /* Use the minimum of all the weights. (Should I be using the product instead?) */
-      total_weight += weight;
-      total_weight_sq += weight*weight;
-
-      double pieceAB = ProfileDistPiece(pA->codes[i], pB->codes[i], fA, fB, dmat, NULL);
-      double pieceAC = ProfileDistPiece(pA->codes[i], pC->codes[i], fA, fC, dmat, NULL);
-      double pieceAD = ProfileDistPiece(pA->codes[i], pD->codes[i], fA, fD, dmat, NULL);
-      double pieceBC = ProfileDistPiece(pB->codes[i], pC->codes[i], fB, fC, dmat, NULL);
-      double pieceBD = ProfileDistPiece(pB->codes[i], pD->codes[i], fB, fD, dmat, NULL);
-      double pieceCD = ProfileDistPiece(pC->codes[i], pD->codes[i], fC, fD, dmat, NULL);
-
-      support1piece = pieceAC+pieceBD-pieceAB-pieceCD;
-      support1sum += weight*support1piece;
-      support1sumsq += weight*support1piece*support1piece;
-
-      support2piece = pieceAD+pieceBC-pieceAB-pieceCD;
-      support2sum += weight*support2piece;
-      support2sumsq += weight*support2piece*support2piece;
-
-      support12sum += weight*support1piece*support2piece;
-    }
-    if (nBootstrap>0) {
-      support1[i] = support1piece;
-      support2[i] = support2piece;
-    }
-    if(verbose>11) fprintf(stderr, "Pos%d weight %f support1piece %f support2piece %f\n",
-			   i, weight, support1piece, support2piece);
-  }
-  assert(iFreqA == pA->nVectors);
-  assert(iFreqB == pB->nVectors);
-  assert(iFreqC == pC->nVectors);
-  assert(iFreqD == pD->nVectors);
-
-  if (support1sum < 0 || support2sum < 0)
-    nSuboptimalSplits++;	/* Another split seems superior */
-  if (total_weight < 2.0) return(0);
-
-  if (nBootstrap > 0) {
-    int nSupport = 0;
-    int iBoot;
-    for (iBoot=0;iBoot<nBootstrap;iBoot++) {
-      double s1 = 0;
-      double s2 = 0;
-      for (i=0;i<nPos;i++) {
-	int pos = (int)(knuth_rand() * nPos);
-	if(pos<0) pos=0;
-	if(pos==nPos) pos=nPos-1;
-	s1 += support1[pos];
-	s2 += support2[pos];
-      }
-      if (s1>0 && s2>0) nSupport++;
-    }
-    support1 = myfree(support1,nPos*sizeof(double));
-    support2 = myfree(support2,nPos*sizeof(double));
-    return( nSupport/(double)nBootstrap );
+void SetDistCriterion(/*IN/OUT*/UPGMA_t *UPGMA, int nActive, /*IN/OUT*/besthit_t *hit) {
+  if (hit->i < UPGMA->nSeq && hit->j < UPGMA->nSeq) {
+    SeqDist(UPGMA->profiles[hit->i]->codes,
+	    UPGMA->profiles[hit->j]->codes,
+	    UPGMA->nPos, UPGMA->distance_matrix, /*OUT*/hit);
   } else {
-    /* mean((X-mean(X))**2) = mean(X*X) - mean(X)**2 
-       var(X) = sqrt(N/(N-1)) * sqrt(mean((X-meanX)**2))
-       covar(X,Y) = mean(XY) - mean(X)*mean(Y)
-    */
-    m1 = support1sum/total_weight;
-    s1 = sqrt(support1sumsq/total_weight - m1*m1);
-    if(s1 < 0.001) s1=0.001;
-    
-    m2 = support2sum/total_weight;
-    s2 = sqrt(support2sumsq/total_weight - m2*m2);
-    if(s2 < 0.001) s2=0.001;
-    
-    cor12 = (support12sum/total_weight - m1*m2)/(s1*s2);
-    /* cor12 might be out of bounds if s1 or s2 was very small */
-    if (cor12 > 0.999) cor12 = 0.999;
-    if (cor12 < -0.999) cor12 = -0.999;
-    
-    /* An unbiased estimator of the variance of n variables is normally mean squared deviance / (sample_size-1)
-       That can be derived from the following:
-       Given independent standard normal variables xi, then
-       SumSquaredDeviance(xi) = sum(square(x-mean(x))) = sum(square(x)) - square(sum(x))/n
-       E(s.s.d.) = n*E(square(x)) - E(square(sum(x)))/n = n -  Var(sum(x))/n = n - n/n = n-1
-       
-       Similarly, if we have weighted observations with weights wi so that sum(wi) = 1, then
-       MeanSquaredDeviance(xi) = sum(wi*square(xi-sum(wj*xj))) = sum(wi*square(xi)) - square(sum(wi*xi))
-       E(m.s.d.) = sum(wi*E(square(xi))) - Var(sum(wi*xi)) = sum(wi) - sum(square(wi)) = 1 - sum(square(wi)) <= (n-1)/n
-       
-       If variables have a variance other than one then we can write
-       E(m.s.d) = Var(xi) * (1 - sum(square(wi)))
-       
-       But we really want the variance of the mean, so we need another factor of total_weight_sq, as
-       Var(mean) = Var(sum(wi*xi)) = sum(wi**2) * Var(xi) = sum(wi**2) * m.s.d. / (1 - sum(square(wi)))
-    */
-    total_weight_sq /= total_weight * total_weight; /* for summing to 1 */
-    s1 *= sqrt(total_weight_sq/(1-total_weight_sq)); /* factor = 1/(n-1) if all weights are equal */
-    s2 *= sqrt(total_weight_sq/(1-total_weight_sq));
-    
-    if(verbose>2) fprintf(stderr,"Mean1 %f SD1 %f Mean2 %f SD2 %f cor %f\n", m1, s1, m2, s2, cor12);
-    
-    /* The mean and variance of the minimum of two normal variables is given by
-       Offer Kella (1986) Commun. Statistc.-Theory Meth. 15:3265-3276
-    */
-    meanMin = -sqrt((s1*s1 + s2*s2 - 2*cor12*s1*s2)/(2*M_PI));
-    sdMin = sqrt((s1*s1 + s2*s2)*(1-1/M_PI)*0.5 + s1*s2*cor12/M_PI);
-    actualMin = m1 < m2 ? m1 : m2;
-    actualZ = sdMin > 0 ? (actualMin-meanMin)/sdMin : 0; /* higher is better */
-    
-    /* P(z > observed | selected this join)  
-       = P(z > observed | P > 0)
-       = 3 * P(z > observed) by symmetry
-    */
-    support = 1 - 3 * pnorm(-actualZ); /* Use -actualZ to get P(z >= actualZ) */
-    if(support<0) support=0;
-    
-    if(verbose>2) fprintf(stderr,"MeanMin %f SDMin %f actualMin %f actualZ %f support %f\n",
-			  meanMin,sdMin,actualMin,actualZ,support);
-    return(support);
+    ProfileDist(UPGMA->profiles[hit->i],
+		UPGMA->profiles[hit->j],
+		UPGMA->nPos, UPGMA->distance_matrix, /*OUT*/hit);
   }
-  assert(0);
-}
-
-void SetDistCriterion(/*IN/OUT*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *hit) {
-  if (hit->i < NJ->nSeq && hit->j < NJ->nSeq) {
-    SeqDist(NJ->profiles[hit->i]->codes,
-	    NJ->profiles[hit->j]->codes,
-	    NJ->nPos, NJ->distance_matrix, /*OUT*/hit);
-  } else {
-    ProfileDist(NJ->profiles[hit->i],
-		NJ->profiles[hit->j],
-		NJ->nPos, NJ->distance_matrix, /*OUT*/hit);
-    hit->dist -= (NJ->diameter[hit->i] + NJ->diameter[hit->j]);
-  }
-  SetCriterion(NJ,nActive,/*IN/OUT*/hit);
-}
-
-void SetCriterion(/*IN/OUT*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join) {
-  if(join->i < 0
-     || join->j < 0
-     || NJ->parent[join->i] >= 0
-     || NJ->parent[join->j] >= 0)
-    return;
-  assert(NJ->nOutDistActive[join->i] >= nActive);
-  assert(NJ->nOutDistActive[join->j] >= nActive);
-
-  int nDiffAllow = tophitsMult > 0 ? (int)(nActive*staleOutLimit) : 0;
-  if (NJ->nOutDistActive[join->i] - nActive > nDiffAllow)
-    SetOutDistance(NJ, join->i, nActive);
-  if (NJ->nOutDistActive[join->j] > nDiffAllow)
-    SetOutDistance(NJ, join->j, nActive);
-  join->criterion = join->dist - (NJ->outDistances[join->i]+NJ->outDistances[join->j])/(double)(nActive-2);
-}
-
-void SetOutDistance(NJ_t *NJ, int iNode, int nActive) {
-  if (NJ->nOutDistActive[iNode] == nActive)
-    return;
-
-  /* May be called by InitNJ before we have parents */
-  assert(iNode>=0 && (NJ->parent == NULL || NJ->parent[iNode]<0));
-  besthit_t dist;
-  ProfileDist(NJ->profiles[iNode], NJ->outprofile, NJ->nPos, NJ->distance_matrix, &dist);
-  outprofileOps++;
-
-  /* out(A) = sum(X!=A) d(A,X)
-     = sum(X!=A) (profiledist(A,X) - diam(A) - diam(X))
-     = sum(X!=A) profiledist(A,X) - (N-1)*diam(A) - (totdiam - diam(A))
-
-     in the absence of gaps:
-     profiledist(A,out) = mean profiledist(A, all active nodes)
-     sum(X!=A) profiledist(A,X) = N * profiledist(A,out) - profiledist(A,A)
-
-     With gaps, we need to take the weights of the comparisons into account, where
-     w(Ai) is the weight of position i in profile A:
-     w(A,B) = sum_i w(Ai) * w(Bi)
-     d(A,B) = sum_i w(Ai) * w(Bi) * d(Ai,Bi) / w(A,B)
-
-     sum(X!=A) profiledist(A,X) ~= (N-1) * profiledist(A, Out w/o A)
-     profiledist(A, Out w/o A) = sum_X!=A sum_i d(Ai,Xi) * w(Ai) * w(Bi) / ( sum_X!=A sum_i w(Ai) * w(Bi) )
-     d(A, Out) = sum_A sum_i d(Ai,Xi) * w(Ai) * w(Bi) / ( sum_X sum_i w(Ai) * w(Bi) )
-
-     and so we get
-     profiledist(A,out w/o A) = (top of d(A,Out) - top of d(A,A)) / (weight of d(A,Out) - weight of d(A,A))
-     top = dist * weight
-     with another correction of nActive because the weight of the out-profile is the average
-     weight not the total weight.
-  */
-  double pdistOutWithoutA = (nActive-1)
-    * (dist.dist * dist.weight * nActive - NJ->selfweight[iNode] * NJ->selfdist[iNode])
-    / (dist.weight * nActive - NJ->selfweight[iNode]);
-  NJ->outDistances[iNode] =  pdistOutWithoutA
-    - NJ->diameter[iNode] * (nActive-1) - (NJ->totdiam - NJ->diameter[iNode]);
-  NJ->nOutDistActive[iNode] = nActive;
-
-  if(verbose>3 && iNode < 5)
-    fprintf(stderr,"NewOutDist for %d %f from dist %f selfd %f diam %f totdiam %f newActive %d\n",
-	    iNode, NJ->outDistances[iNode], dist.dist, NJ->selfdist[iNode], NJ->diameter[iNode],
-	    NJ->totdiam, nActive);
-  if (verbose>6 && (iNode % 10) == 0) {
-    /* Compute the actual out-distance and compare */
-    double total = 0.0;
-    double total_pd = 0.0;
-    int j;
-    for (j=0;j<NJ->maxnode;j++) {
-      if (j!=iNode && (NJ->parent==NULL || NJ->parent[j]<0)) {
-	besthit_t bh;
-	ProfileDist(NJ->profiles[iNode], NJ->profiles[j], NJ->nPos, NJ->distance_matrix, /*OUT*/&bh);
-	total_pd += bh.dist;
-	total += bh.dist - (NJ->diameter[iNode] + NJ->diameter[j]);
-      }
-    }
-    fprintf(stderr,"OutDist for Node %d %f truth %f profiled %f truth %f pd_err %f\n",
-	    iNode, NJ->outDistances[iNode], total, pdistOutWithoutA, total_pd,fabs(pdistOutWithoutA-total_pd));
-  }
+  hit->criterion = hit->dist; /* No neighbor joining */
 }
 
 /* Helper function for sorting in SetAllLeafTopHits,
    and the global variables it needs
 */
-NJ_t *CompareSeedNJ = NULL;
+UPGMA_t *CompareSeedUPGMA = NULL;
 int *CompareSeedGaps = NULL;
 int CompareSeeds(const void *c1, const void *c2) {
   int seed1 = *(int *)c1;
   int seed2 = *(int *)c2;
   int gapdiff = CompareSeedGaps[seed1] - CompareSeedGaps[seed2];
   if (gapdiff != 0) return(gapdiff);	/* fewer gaps is better */
-  double outdiff = CompareSeedNJ->outDistances[seed1] - CompareSeedNJ->outDistances[seed2];
+  double outdiff = CompareSeedUPGMA->outDistances[seed1] - CompareSeedUPGMA->outDistances[seed2];
   if(outdiff < 0) return(-1);	/* closer to more nodes is better */
   if(outdiff > 0) return(1);
   return(0);
 }
 
 /* Using the seed heuristic and the close global variable */
-void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits) {
+void SetAllLeafTopHits(UPGMA_t *UPGMA, int m, /*OUT*/besthit_t **tophits) {
 
-  /* Sort the potential seeds, by a combination of nGaps and NJ->outDistances
+  /* Sort the potential seeds, by a combination of nGaps and UPGMA->outDistances
      We don't store nGaps so we need to compute that
   */
-  int *nGaps = (int*)mymalloc(sizeof(int)*NJ->nSeq);
+  int *nGaps = (int*)mymalloc(sizeof(int)*UPGMA->nSeq);
   int iNode;
-  for(iNode=0; iNode<NJ->nSeq; iNode++) {
-    nGaps[iNode] = (int)(0.5 + NJ->nPos - NJ->selfweight[iNode]);
+  for(iNode=0; iNode<UPGMA->nSeq; iNode++) {
+    int i;
+    nGaps[iNode] = 0;
+    for (i = 0; i < UPGMA->nPos; i++) 
+      if (UPGMA->profiles[iNode]->codes[i] == NOCODE)
+	nGaps[iNode]++;
   }
-  int *seeds = (int*)mymalloc(sizeof(int)*NJ->nSeq);
-  for (iNode=0; iNode<NJ->nSeq; iNode++) seeds[iNode] = iNode;
-  CompareSeedNJ = NJ;
+  int *seeds = (int*)mymalloc(sizeof(int)*UPGMA->nSeq);
+  for (iNode=0; iNode<UPGMA->nSeq; iNode++) seeds[iNode] = iNode;
+  CompareSeedUPGMA = UPGMA;
   CompareSeedGaps = nGaps;
-  qsort(/*IN/OUT*/seeds, NJ->nSeq, sizeof(int), CompareSeeds);
-  CompareSeedNJ = NULL;
+  qsort(/*IN/OUT*/seeds, UPGMA->nSeq, sizeof(int), CompareSeeds);
+  CompareSeedUPGMA = NULL;
   CompareSeedGaps = NULL;
 
-  besthit_t *besthitsSeed = (besthit_t*)mymalloc(sizeof(besthit_t)*NJ->nSeq);
+  besthit_t *besthitsSeed = (besthit_t*)mymalloc(sizeof(besthit_t)*UPGMA->nSeq);
   besthit_t *besthitsNeighbor = (besthit_t*)mymalloc(sizeof(besthit_t)*2*m);
   besthit_t bestjoin;
 
   /* For each seed, save its top 2*m hits and then look for close neighbors */
-  assert(2*m <= NJ->nSeq);
+  assert(2*m <= UPGMA->nSeq);
   int iSeed;
-  for(iSeed=0; iSeed < NJ->nSeq; iSeed++) {
+  for(iSeed=0; iSeed < UPGMA->nSeq; iSeed++) {
     int seed = seeds[iSeed];
     if (tophits[seed] != NULL) {
       if(verbose>2) fprintf(stderr, "Skipping seed %d\n", seed);
       continue;
     }
     if(verbose>2) fprintf(stderr,"Trying seed %d\n", seed);
-    SetBestHit(seed, NJ, /*nActive*/NJ->nSeq, /*OUT*/&bestjoin, /*OUT*/besthitsSeed);
+    SetBestHit(seed, UPGMA, /*nActive*/UPGMA->nSeq, /*OUT*/&bestjoin, /*OUT*/besthitsSeed);
 
     /* sort & save top hits of self. besthitsSeed is now sorted. */
-    tophits[seed] = SortSaveBestHits(besthitsSeed, seed, /*IN-SIZE*/NJ->nSeq, /*OUT-SIZE*/m);
+    tophits[seed] = SortSaveBestHits(besthitsSeed, seed, /*IN-SIZE*/UPGMA->nSeq, /*OUT-SIZE*/m);
 
     /* find "close" neighbors and compute their top hits */
     double neardist = besthitsSeed[2*m-1].dist * tophitsClose;
@@ -2725,26 +1836,26 @@ void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits) {
     double nearcover = 1.0 - neardist/2.0;
 
     if(verbose>2) fprintf(stderr,"Distance limit for close neighbors %f weight %f ungapped %d\n",
-			  neardist, nearweight, NJ->nPos-nGaps[seed]);
+			  neardist, nearweight, UPGMA->nPos-nGaps[seed]);
     for (iClose = 0; iClose < m; iClose++) {
       besthit_t *closehit = &tophits[seed][iClose];
       int closeNode = closehit->j;
       /* If within close-distance, or identical, use as close neighbor */
       bool close = closehit->dist <= neardist
 	&& (closehit->weight >= nearweight
-	    || closehit->weight >= (NJ->nPos-nGaps[closeNode])*nearcover);
+	    || closehit->weight >= (UPGMA->nPos-nGaps[closeNode])*nearcover);
       bool identical = closehit->dist == 0
-	&& fabs(closehit->weight - (NJ->nPos - nGaps[seed])) < 1e-5
-	&& fabs(closehit->weight - (NJ->nPos - nGaps[closeNode])) < 1e-5;
+	&& fabs(closehit->weight - (UPGMA->nPos - nGaps[seed])) < 1e-5
+	&& fabs(closehit->weight - (UPGMA->nPos - nGaps[closeNode])) < 1e-5;
       if (tophits[closeNode] == NULL && (close || identical)) {
 	nCloseUsed++;
 	if(verbose>2) fprintf(stderr, "Near neighbor %d (rank %d weight %f ungapped %d %d)\n",
 			      closeNode, iClose, tophits[seed][iClose].weight,
-			      NJ->nPos-nGaps[seed],
-			      NJ->nPos-nGaps[closeNode]);
+			      UPGMA->nPos-nGaps[seed],
+			      UPGMA->nPos-nGaps[closeNode]);
 
 	/* compute top 2*m hits */
-	TransferBestHits(NJ, /*nActive*/NJ->nSeq,
+	TransferBestHits(UPGMA, /*nActive*/UPGMA->nSeq,
 			 closeNode,
 			 /*IN*/besthitsSeed, /*SIZE*/2*m,
 			 /*OUT*/besthitsNeighbor,
@@ -2753,7 +1864,7 @@ void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits) {
 	if (verbose>3 && (closeNode%10)==0) {
 	  /* Double-check the top-hit list */
 	  besthit_t best;
-	  SetBestHit(closeNode, NJ, /*nActive*/NJ->nSeq, &best, /*OPTIONAL-ALL*/NULL);
+	  SetBestHit(closeNode, UPGMA, /*nActive*/UPGMA->nSeq, &best, /*OPTIONAL-ALL*/NULL);
 	  int iBest;
 	  int found = 0;
 	  for (iBest=0; iBest<2*m; iBest++) {
@@ -2770,27 +1881,27 @@ void SetAllLeafTopHits(NJ_t *NJ, int m, /*OUT*/besthit_t **tophits) {
     } /* end loop over close candidates */
   } /* end loop over seeds */
 
-  for (iNode=0;iNode<NJ->nSeq;iNode++) {
+  for (iNode=0;iNode<UPGMA->nSeq;iNode++) {
     assert(tophits[iNode] != NULL);
     assert(tophits[iNode][0].i == iNode);
     assert(tophits[iNode][0].j >= 0);
-    assert(tophits[iNode][0].j < NJ->nSeq);
+    assert(tophits[iNode][0].j < UPGMA->nSeq);
     assert(tophits[iNode][0].j != iNode);
   }
-  if (verbose>1) fprintf(stderr, "#Close neighbors among leaves: %ld seeds %ld\n", nCloseUsed, NJ->nSeq-nCloseUsed);
-  nGaps = myfree(nGaps, sizeof(int)*NJ->nSeq);
-  seeds = myfree(seeds, sizeof(int)*NJ->nSeq);
-  besthitsSeed = myfree(besthitsSeed, sizeof(besthit_t)*NJ->nSeq);
+  if (verbose>1) fprintf(stderr, "#Close neighbors among leaves: %ld seeds %ld\n", nCloseUsed, UPGMA->nSeq-nCloseUsed);
+  nGaps = myfree(nGaps, sizeof(int)*UPGMA->nSeq);
+  seeds = myfree(seeds, sizeof(int)*UPGMA->nSeq);
+  besthitsSeed = myfree(besthitsSeed, sizeof(besthit_t)*UPGMA->nSeq);
   besthitsNeighbor = myfree(besthitsNeighbor, sizeof(besthit_t)*2*m);
 }
 
 /* Updates out-distances but does not reset or update visible set */
 int GetBestFromTopHits(int iNode,
-			/*IN/OUT*/NJ_t *NJ,
+			/*IN*/UPGMA_t *UPGMA,
 			int nActive,
 			/*IN/UPDATE*/besthit_t *tophits,
 			int nTopHits) {
-  assert(NJ->parent[iNode] < 0);
+  assert(UPGMA->parent[iNode] < 0);
   int bestIndex = -1;
 
   int iBest;
@@ -2801,14 +1912,11 @@ int GetBestFromTopHits(int iNode,
 
     /* Walk up to active node and compute new distance value if necessary */
     int j = hit->j;
-    while(NJ->parent[j] >= 0) j = NJ->parent[j];
+    while(UPGMA->parent[j] >= 0) j = UPGMA->parent[j];
     if (iNode == j) continue;
     if (j != hit->j) {
       hit->j = j;
-      SetDistCriterion(NJ, nActive, /*IN/OUT*/hit);
-    } else {
-      /* Update out distances if needed, and compute criterion */
-      SetCriterion(/*IN/OUT*/NJ, nActive, /*IN/OUT*/hit);
+      SetDistCriterion(UPGMA, nActive, /*IN/OUT*/hit);
     }
     if (bestIndex < 0)
       bestIndex = iBest;
@@ -2826,7 +1934,7 @@ int GetBestFromTopHits(int iNode,
 /* Make a shorter list with only unique entries
    Also removes "stale" hits to nodes that have parents
 */
-besthit_t *UniqueBestHits(NJ_t *NJ, int iNode,
+besthit_t *UniqueBestHits(UPGMA_t *UPGMA, int iNode,
 			  besthit_t *combined, int nCombined,
 			  /*OUT*/int *nUniqueOut) {
   qsort(/*IN/OUT*/combined, nCombined, sizeof(besthit_t), CompareHitsByJ);
@@ -2836,7 +1944,7 @@ besthit_t *UniqueBestHits(NJ_t *NJ, int iNode,
   int iHit = 0;
   for (iHit = 0; iHit < nCombined; iHit++) {
     besthit_t *hit = &combined[iHit];
-    if(hit->j < 0 || hit->j == iNode || NJ->parent[hit->j] >= 0) continue;
+    if(hit->j < 0 || hit->j == iNode || UPGMA->parent[hit->j] >= 0) continue;
     assert(hit->i == iNode);
     if (nUnique > 0 && hit->j == uniqueList[nUnique-1].j) continue;
     assert(nUnique < nCombined);
@@ -2854,7 +1962,7 @@ besthit_t *UniqueBestHits(NJ_t *NJ, int iNode,
   Also update visible set for other nodes if we stumble across a "better" hit
 */
  
-void TopHitJoin(/*IN/OUT*/NJ_t *NJ,
+void TopHitJoin(/*IN/OUT*/UPGMA_t *UPGMA,
 		int newnode,
 		int nActive,
 		int m,
@@ -2862,23 +1970,23 @@ void TopHitJoin(/*IN/OUT*/NJ_t *NJ,
 		/*IN/OUT*/int *tophitAge,
 		/*IN/OUT*/besthit_t *visible) {
   besthit_t *combinedList = (besthit_t*)mymalloc(sizeof(besthit_t)*2*m);
-  assert(NJ->child[newnode].nChild == 2);
+  assert(UPGMA->child[newnode].nChild == 2);
   assert(tophits[newnode] == NULL);
 
   /* Copy the hits */
-  TransferBestHits(NJ, nActive, newnode, tophits[NJ->child[newnode].child[0]], m,
+  TransferBestHits(UPGMA, nActive, newnode, tophits[UPGMA->child[newnode].child[0]], m,
 		   /*OUT*/combinedList,
 		   /*updateDistance*/false);
-  TransferBestHits(NJ, nActive, newnode, tophits[NJ->child[newnode].child[1]], m,
+  TransferBestHits(UPGMA, nActive, newnode, tophits[UPGMA->child[newnode].child[1]], m,
 		   /*OUT*/combinedList+m,
 		   /*updateDistance*/false);
   int nUnique;
-  besthit_t *uniqueList = UniqueBestHits(NJ, newnode, combinedList, 2*m, /*OUT*/&nUnique);
+  besthit_t *uniqueList = UniqueBestHits(UPGMA, newnode, combinedList, 2*m, /*OUT*/&nUnique);
   combinedList = myfree(combinedList, sizeof(besthit_t)*2*m);
 
-  tophitAge[newnode] = tophitAge[NJ->child[newnode].child[0]];
-  if (tophitAge[newnode] < tophitAge[NJ->child[newnode].child[1]])
-    tophitAge[newnode] = tophitAge[NJ->child[newnode].child[1]];
+  tophitAge[newnode] = tophitAge[UPGMA->child[newnode].child[0]];
+  if (tophitAge[newnode] < tophitAge[UPGMA->child[newnode].child[1]])
+    tophitAge[newnode] = tophitAge[UPGMA->child[newnode].child[1]];
   tophitAge[newnode]++;
 
   /* If top hit ages always match, then log2(m) would mean a refresh after
@@ -2899,7 +2007,7 @@ void TopHitJoin(/*IN/OUT*/NJ_t *NJ,
     /* Update distances */
     int iHit;
     for (iHit = 0; iHit < nUnique; iHit++)
-      SetDistCriterion(NJ, nActive, /*IN/OUT*/&uniqueList[iHit]);
+      SetDistCriterion(UPGMA, nActive, /*IN/OUT*/&uniqueList[iHit]);
     tophits[newnode] = SortSaveBestHits(uniqueList, newnode, /*nIn*/nUnique, /*nOut*/m);
   } else {
     /* need to refresh: set top hits for node and for its top hits */
@@ -2908,21 +2016,14 @@ void TopHitJoin(/*IN/OUT*/NJ_t *NJ,
     nRefreshTopHits++;
     tophitAge[newnode] = 0;
 
-    /* update all out-distances */
-    int iNode;
-    for (iNode = 0; iNode < NJ->maxnode; iNode++) {
-      if (NJ->parent[iNode] < 0)
-	SetOutDistance(/*IN/OUT*/NJ, iNode, nActive);
-    }
-
     /* exhaustively get the best 2*m hits for newnode */
-    besthit_t *allhits = (besthit_t*)mymalloc(sizeof(besthit_t)*NJ->maxnode);
-    assert(2*m <= NJ->maxnode);
-    SetBestHit(newnode, NJ, nActive, /*OUT*/&visible[newnode], /*OUT*/allhits);
-    qsort(/*IN/OUT*/allhits, NJ->maxnode, sizeof(besthit_t), CompareHitsByCriterion);
+    besthit_t *allhits = (besthit_t*)mymalloc(sizeof(besthit_t)*UPGMA->maxnode);
+    assert(2*m <= UPGMA->maxnode);
+    SetBestHit(newnode, UPGMA, nActive, /*OUT*/&visible[newnode], /*OUT*/allhits);
+    qsort(/*IN/OUT*/allhits, UPGMA->maxnode, sizeof(besthit_t), CompareHitsByCriterion);
 
     /* set its top hit list  */
-    tophits[newnode] = SortSaveBestHits(allhits, newnode, /*nIn*/NJ->maxnode, /*nOut*/m);
+    tophits[newnode] = SortSaveBestHits(allhits, newnode, /*nIn*/UPGMA->maxnode, /*nOut*/m);
 
     /* And use the top 2*m entries to expand other best-hit lists, but only for top m */
     besthit_t *bothList = (besthit_t*)mymalloc(sizeof(besthit_t)*3*m);
@@ -2931,45 +2032,44 @@ void TopHitJoin(/*IN/OUT*/NJ_t *NJ,
       if (allhits[iHit].i < 0) continue;
       int iNode = allhits[iHit].j;
       assert(iNode>=0);
-      if (NJ->parent[iNode] >= 0) continue;
+      if (UPGMA->parent[iNode] >= 0) continue;
       tophitAge[iNode] = 0;
 
       /* Merge */
       int i;
       for (i=0;i<m;i++) {
 	bothList[i] = tophits[iNode][i];
-	SetCriterion(/*IN/OUT*/NJ, nActive, /*IN/OUT*/&bothList[i]);
       }
-      TransferBestHits(NJ, nActive, iNode, /*IN*/allhits, /*nOldHits*/2*m,
+      TransferBestHits(UPGMA, nActive, iNode, /*IN*/allhits, /*nOldHits*/2*m,
 		       /*OUT*/&bothList[m],
 		       /*updateDist*/true);
       int nUnique2;
-      besthit_t *uniqueList2 = UniqueBestHits(NJ, iNode, bothList, 3*m, /*OUT*/&nUnique2);
+      besthit_t *uniqueList2 = UniqueBestHits(UPGMA, iNode, bothList, 3*m, /*OUT*/&nUnique2);
       tophits[iNode] = myfree(tophits[iNode], m*sizeof(besthit_t));
       tophits[iNode] = SortSaveBestHits(uniqueList2, iNode, /*nIn*/nUnique2, /*nOut*/m);
       uniqueList2 = myfree(uniqueList2, 3*m*sizeof(besthit_t));
 
-      visible[iNode] = tophits[iNode][GetBestFromTopHits(iNode,NJ,nActive,tophits[iNode],m)];
-      ResetVisible(NJ, nActive, tophits[iNode], m, /*IN/OUT*/visible);
+      visible[iNode] = tophits[iNode][GetBestFromTopHits(iNode,UPGMA,nActive,tophits[iNode],m)];
+      ResetVisible(UPGMA, nActive, tophits[iNode], m, /*IN/OUT*/visible);
     }
     bothList = myfree(bothList,3*m*sizeof(besthit_t));
-    allhits = myfree(allhits,sizeof(besthit_t)*NJ->maxnode);
+    allhits = myfree(allhits,sizeof(besthit_t)*UPGMA->maxnode);
   }
   /* Still need to set visible[newnode] and reset */
-  visible[newnode] = tophits[newnode][GetBestFromTopHits(newnode,NJ,nActive,tophits[newnode],m)];
-  ResetVisible(NJ, nActive, tophits[newnode], m, /*IN/OUT*/visible);
+  visible[newnode] = tophits[newnode][GetBestFromTopHits(newnode,UPGMA,nActive,tophits[newnode],m)];
+  ResetVisible(UPGMA, nActive, tophits[newnode], m, /*IN/OUT*/visible);
 
   uniqueList = myfree(uniqueList, 2*m*sizeof(besthit_t));
 
   /* Forget top-hit list of children */
   int c;
-  for(c = 0; c < NJ->child[newnode].nChild; c++) {
-    int child = NJ->child[newnode].child[c];
+  for(c = 0; c < UPGMA->child[newnode].nChild; c++) {
+    int child = UPGMA->child[newnode].child[c];
     tophits[child] = myfree(tophits[child], m*sizeof(besthit_t));
   }
 }
 
-void ResetVisible(NJ_t *NJ, int nActive,
+void ResetVisible(UPGMA_t *UPGMA, int nActive,
 		   /*IN*/besthit_t *tophits,
 		   int nTopHits,
 		   /*IN/UPDATE*/besthit_t *visible) {
@@ -2979,8 +2079,8 @@ void ResetVisible(NJ_t *NJ, int nActive,
   for(iHit = 0; iHit < nTopHits; iHit++) {
     besthit_t *hit = &tophits[iHit];
     if (hit->i < 0) continue;
-    assert(hit->j >= 0 && NJ->parent[hit->j] < 0);
-    if (NJ->parent[visible[hit->j].j] >= 0) {
+    assert(hit->j >= 0 && UPGMA->parent[hit->j] < 0);
+    if (UPGMA->parent[visible[hit->j].j] >= 0) {
       /* Visible no longer active, so use this ("reset") */
       visible[hit->j] = *hit;
       visible[hit->j].j = visible[hit->j].i;
@@ -2989,100 +2089,23 @@ void ResetVisible(NJ_t *NJ, int nActive,
 			    hit->j,visible[hit->j].j,visible[hit->j].dist,visible[hit->j].criterion);
     } else {
       /* see if this is a better hit -- if it is, "reset" */
-      SetCriterion(/*IN/OUT*/NJ, nActive, /*IN/OUT*/&visible[hit->j]);
       if (hit->criterion < visible[hit->j].criterion) {
 	visible[hit->j] = *hit;
 	visible[hit->j].j = visible[hit->j].i;
 	visible[hit->j].i = hit->j;
 	if(verbose>5) fprintf(stderr,"ResetVisible %d %d %f %f\n",
 			      hit->j,visible[hit->j].j,visible[hit->j].dist,visible[hit->j].criterion);
-	nVisibleReset++;
       }
     }
   } /* end loop over hits */
 }
 
-/*
-  Find best hit to do in O(N*log(N) + m*L*log(N)) time, by
-  copying and sorting the visible list
-  updating out-distances for the top (up to m) candidates
-  selecting the best hit
-  if !fastest then
-  	local hill-climbing for a better join,
-	using best-hit lists only, and updating
-	all out-distances in every best-hit list
-*/
-void TopHitNJSearch(/*IN/OUT*/NJ_t *NJ, int nActive, int m,
-		    /*IN/OUT*/besthit_t *visible,
-		    /*IN/OUT*/besthit_t **tophits,
-		    /*OUT*/besthit_t *join) {
-  besthit_t *visibleSorted = mymalloc(sizeof(besthit_t)*nActive);
-  int nVisible = 0;		/* #entries in visibleSorted */
-  int iNode;
-  for (iNode = 0; iNode < NJ->maxnode; iNode++) {
-    /* skip joins involving stale nodes or joins we've already saved */
-    if (NJ->parent[iNode] >= 0) continue;
-    assert(visible[iNode].i == iNode);
-    int j = visible[iNode].j;
-    if(NJ->parent[j] >= 0) continue;
-    if (j < iNode && visible[j].j == iNode) continue;
-
-    assert(nVisible < nActive);
-    visibleSorted[nVisible++] = visible[iNode];
-  }
-  assert(nVisible > 0);
-
-  qsort(/*IN/OUT*/visibleSorted,nVisible,sizeof(besthit_t),CompareHitsByCriterion);
-
-  /* Only keep the top m items */
-  if(nVisible > m) nVisible = m;
-
-  int iBest;
-  for (iBest = 0; iBest < nVisible; iBest++)
-    SetCriterion(/*IN/OUT*/NJ, nActive, /*IN/OUT*/&visibleSorted[iBest]);
-
-  qsort(/*IN/OUT*/visibleSorted,nVisible,sizeof(besthit_t),CompareHitsByCriterion);
-
-  *join = visibleSorted[0];
-  visibleSorted = myfree(visibleSorted, sizeof(besthit_t)*nActive);
-
-  if(fastest) return;
-
-  int changed;
-  do {
-    changed = 0;
-
-    besthit_t *bestI = &tophits[join->i][GetBestFromTopHits(join->i, NJ, nActive, tophits[join->i], m)];
-    assert(bestI->i == join->i);
-    if (bestI->j != join->j && bestI->criterion < join->criterion) {
-      changed = 1;
-      if (verbose>2)
-	fprintf(stderr,"BetterI\t%d\t%d\t%d\t%d\t%f\t%f\n",
-		join->i,join->j,bestI->i,bestI->j,
-		join->criterion,bestI->criterion);
-      *join = *bestI;
-    }
-
-    besthit_t *bestJ = &tophits[join->j][GetBestFromTopHits(join->j, NJ, nActive, tophits[join->j], m)];
-    assert(bestJ->i == join->j);
-    if (bestJ->j != join->i && bestJ->criterion < join->criterion) {
-      changed = 1;
-      if (verbose>2)
-	fprintf(stderr,"BetterJ\t%d\t%d\t%d\t%d\t%f\t%f\n",
-		join->i,join->j,bestJ->i,bestJ->j,
-		join->criterion,bestJ->criterion);
-      *join = *bestJ;
-    }
-    if(changed) nBetter++;
-  } while(changed);
-}
-
-int NGaps(/*IN*/NJ_t *NJ, int iNode) {
-  assert(iNode < NJ->nSeq);
+int NGaps(/*IN*/UPGMA_t *UPGMA, int iNode) {
+  assert(iNode < UPGMA->nSeq);
   int nGaps = 0;
   int p;
-  for(p=0; p<NJ->nPos; p++) {
-    if (NJ->profiles[iNode]->codes[p] == NOCODE)
+  for(p=0; p<UPGMA->nPos; p++) {
+    if (UPGMA->profiles[iNode]->codes[p] == NOCODE)
       nGaps++;
   }
   return(nGaps);
@@ -3124,14 +2147,14 @@ besthit_t *SortSaveBestHits(besthit_t *besthits, int iNode, int insize, int outs
   return(saved);
 }
 
-void TransferBestHits(/*IN/OUT*/NJ_t *NJ,
+void TransferBestHits(/*IN/OUT*/UPGMA_t *UPGMA,
 		       int nActive,
 		      int iNode,
 		      /*IN*/besthit_t *oldhits,
 		      int nOldHits,
 		      /*OUT*/besthit_t *newhits,
 		      bool updateDistances) {
-  assert(NJ->parent[iNode] < 0);
+  assert(UPGMA->parent[iNode] < 0);
 
   int iBest;
   for(iBest = 0; iBest < nOldHits; iBest++) {
@@ -3145,39 +2168,15 @@ void TransferBestHits(/*IN/OUT*/NJ_t *NJ,
       new->criterion = 1e20;
     } else {
       /* Move up to an active node */
-      while(NJ->parent[j] >= 0)
-	j = NJ->parent[j];
+      while(UPGMA->parent[j] >= 0)
+	j = UPGMA->parent[j];
       
       new->i = iNode;
       new->j = j;
       if (updateDistances)
-	SetDistCriterion(NJ, nActive, /*IN/OUT*/new);
+	SetDistCriterion(UPGMA, nActive, /*IN/OUT*/new);
     }
   }
-}
-
-/* Algorithm 26.2.17 from Abromowitz and Stegun, Handbook of Mathematical Functions
-   Absolute accuracy of only about 1e-7, which is enough for us
-*/
-double pnorm(double x)
-{
-  double b1 =  0.319381530;
-  double b2 = -0.356563782;
-  double b3 =  1.781477937;
-  double b4 = -1.821255978;
-  double b5 =  1.330274429;
-  double p  =  0.2316419;
-  double c  =  0.39894228;
-
-  if(x >= 0.0) {
-    double t = 1.0 / ( 1.0 + p * x );
-    return (1.0 - c * exp( -x * x / 2.0 ) * t *
-	    ( t *( t * ( t * ( t * b5 + b4 ) + b3 ) + b2 ) + b1 ));
-  }
-  /*else*/
-  double t = 1.0 / ( 1.0 - p * x );
-  return ( c * exp( -x * x / 2.0 ) * t *
-	   ( t *( t * ( t * ( t * b5 + b4 ) + b3 ) + b2 ) + b1 ));
 }
 
 void *mymalloc(size_t sz) {
@@ -3189,11 +2188,6 @@ void *mymalloc(size_t sz) {
   }
   szAllAlloc += sz;
   mymallocUsed += sz;
-#ifdef TRACK_MEMORY
-  struct mallinfo mi = mallinfo();
-  if (mi.arena+mi.hblkhd > maxmallocHeap)
-    maxmallocHeap = mi.arena+mi.hblkhd;
-#endif
   return (new);
 }
 
@@ -3218,11 +2212,6 @@ void *myrealloc(void *data, size_t szOld, size_t szNew) {
   }
   szAllAlloc += (szNew-szOld);
   mymallocUsed += (szNew-szOld);
-#ifdef TRACK_MEMORY
-    struct mallinfo mi = mallinfo();
-    if (mi.arena+mi.hblkhd > maxmallocHeap)
-      maxmallocHeap = mi.arena+mi.hblkhd;
-#endif
   return(new);
 }
 
@@ -3231,112 +2220,6 @@ void *myfree(void *p, size_t sz) {
   free(p);
   mymallocUsed -= sz;
   return(NULL);
-}
-
-/* The random number generator is taken from D E Knuth 
-   http://www-cs-faculty.stanford.edu/~knuth/taocp.html
-*/
-
-/*    This program by D E Knuth is in the public domain and freely copyable.
- *    It is explained in Seminumerical Algorithms, 3rd edition, Section 3.6
- *    (or in the errata to the 2nd edition --- see
- *        http://www-cs-faculty.stanford.edu/~knuth/taocp.html
- *    in the changes to Volume 2 on pages 171 and following).              */
-
-/*    N.B. The MODIFICATIONS introduced in the 9th printing (2002) are
-      included here; there's no backwards compatibility with the original. */
-
-/*    This version also adopts Brendan McKay's suggestion to
-      accommodate naive users who forget to call ran_start(seed).          */
-
-/*    If you find any bugs, please report them immediately to
- *                 taocp@cs.stanford.edu
- *    (and you will be rewarded if the bug is genuine). Thanks!            */
-
-/************ see the book for explanations and caveats! *******************/
-/************ in particular, you need two's complement arithmetic **********/
-
-#define KK 100                     /* the long lag */
-#define LL  37                     /* the short lag */
-#define MM (1L<<30)                 /* the modulus */
-#define mod_diff(x,y) (((x)-(y))&(MM-1)) /* subtraction mod MM */
-
-long ran_x[KK];                    /* the generator state */
-
-#ifdef __STDC__
-void ran_array(long aa[],int n)
-#else
-     void ran_array(aa,n)    /* put n new random numbers in aa */
-     long *aa;   /* destination */
-     int n;      /* array length (must be at least KK) */
-#endif
-{
-  register int i,j;
-  for (j=0;j<KK;j++) aa[j]=ran_x[j];
-  for (;j<n;j++) aa[j]=mod_diff(aa[j-KK],aa[j-LL]);
-  for (i=0;i<LL;i++,j++) ran_x[i]=mod_diff(aa[j-KK],aa[j-LL]);
-  for (;i<KK;i++,j++) ran_x[i]=mod_diff(aa[j-KK],ran_x[i-LL]);
-}
-
-/* the following routines are from exercise 3.6--15 */
-/* after calling ran_start, get new randoms by, e.g., "x=ran_arr_next()" */
-
-#define QUALITY 1009 /* recommended quality level for high-res use */
-long ran_arr_buf[QUALITY];
-long ran_arr_dummy=-1, ran_arr_started=-1;
-long *ran_arr_ptr=&ran_arr_dummy; /* the next random number, or -1 */
-
-#define TT  70   /* guaranteed separation between streams */
-#define is_odd(x)  ((x)&1)          /* units bit of x */
-
-#ifdef __STDC__
-void ran_start(long seed)
-#else
-     void ran_start(seed)    /* do this before using ran_array */
-     long seed;            /* selector for different streams */
-#endif
-{
-  register int t,j;
-  long x[KK+KK-1];              /* the preparation buffer */
-  register long ss=(seed+2)&(MM-2);
-  for (j=0;j<KK;j++) {
-    x[j]=ss;                      /* bootstrap the buffer */
-    ss<<=1; if (ss>=MM) ss-=MM-2; /* cyclic shift 29 bits */
-  }
-  x[1]++;              /* make x[1] (and only x[1]) odd */
-  for (ss=seed&(MM-1),t=TT-1; t; ) {       
-    for (j=KK-1;j>0;j--) x[j+j]=x[j], x[j+j-1]=0; /* "square" */
-    for (j=KK+KK-2;j>=KK;j--)
-      x[j-(KK-LL)]=mod_diff(x[j-(KK-LL)],x[j]),
-	x[j-KK]=mod_diff(x[j-KK],x[j]);
-    if (is_odd(ss)) {              /* "multiply by z" */
-      for (j=KK;j>0;j--)  x[j]=x[j-1];
-      x[0]=x[KK];            /* shift the buffer cyclically */
-      x[LL]=mod_diff(x[LL],x[KK]);
-    }
-    if (ss) ss>>=1; else t--;
-  }
-  for (j=0;j<LL;j++) ran_x[j+KK-LL]=x[j];
-  for (;j<KK;j++) ran_x[j-LL]=x[j];
-  for (j=0;j<10;j++) ran_array(x,KK+KK-1); /* warm things up */
-  ran_arr_ptr=&ran_arr_started;
-}
-
-#define ran_arr_next() (*ran_arr_ptr>=0? *ran_arr_ptr++: ran_arr_cycle())
-long ran_arr_cycle()
-{
-  if (ran_arr_ptr==&ran_arr_dummy)
-    ran_start(314159L); /* the user forgot to initialize */
-  ran_array(ran_arr_buf,QUALITY);
-  ran_arr_buf[KK]=-1;
-  ran_arr_ptr=ran_arr_buf+1;
-  return ran_arr_buf[0];
-}
-
-/* end of code from Knuth */
-
-double knuth_rand() {
-  return(9.31322574615479e-10 * ran_arr_next()); /* multiply by 2**-30 */
 }
 
 hashstrings_t *MakeHashtable(char **strings, int nStrings) {
