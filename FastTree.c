@@ -1,6 +1,7 @@
 /*
  * FastTree -- neighbor joining for multiple sequence alignments using profiles
  * Morgan N. Price, 2008-2009
+ * http://www.microbesonline.org/fasttree/
  *
  *  Copyright (C) 2008 The Regents of the University of California
  *  All rights reserved.
@@ -221,12 +222,15 @@
 #endif
 
 char *usage =
-  "Usage for FastTree version 1.0.4:\n"
-  "FastTree [-quiet] [-boot 1000] [-seed 1253] [-nni 10] [-slow | -fastest]\n"
-  "          [-top | -notop] [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
-  "          [-matrix Matrix | -nomatrix] [-nj | -bionj]\n"
-  "          [-nt] [-n 100] [alignment] [-pseudo | -pseudo 1.0]\n"
-  "          [ -constraints constraintAlignment [ -constraintsWeight 10.0 ] ]\n"
+  "Usage for FastTree version 1.0.5:\n"
+  "FastTree [ -nt] [-n 100] [-pseudo | -pseudo 1.0]  [-boot 1000] [-quiet]\n"
+  "           [-intree starting_trees_file | -intree1 starting_tree_file]\n"
+  "           [-nni 10] [-slow | -fastest] [-seed 1253] \n"
+  "           [-top | -notop] [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
+  "           [-matrix Matrix | -nomatrix] [-nj | -bionj]\n"
+  "           [-nt] \n"
+  "           [ -constraints constraintAlignment [ -constraintsWeight 10.0 ] ]\n"
+  "         [ alignment_file ]\n"
   "        > newick_tree\n"
   "\n"
   "or\n"
@@ -243,6 +247,9 @@ char *usage =
   "  use it with the output from phylip's seqboot. If you use -n, FastTree\n"
   "  will write 1 tree per line to standard output. You might also\n"
   "  want to use -quiet to eliminate status messages to standard error.\n"
+  "  If you use -n together with -intree starting_tree_file,\n"
+  "  then FastTree will also read that many trees from the file\n"
+  "  (Use -intree1 if you want to use the same starting tree each time)\n"
   "\n"
   "Distances:\n"
   "  Default: For protein sequences, log-corrected distances and an\n"
@@ -312,6 +319,10 @@ char *usage =
 ;
 
 
+#define MAXCODES 20
+#define NOCODE 127
+#define BUFFER_SIZE 1000
+
 typedef struct {
   int nPos;
   int nSeq;
@@ -319,10 +330,6 @@ typedef struct {
   char **seqs;
   int nSaved; /* actual allocated size of names and seqs */
 } alignment_t;
-
-#define MAXCODES 20
-#define NOCODE 127
-#define BUFFER_SIZE 1000
 
 /* For each position in a profile, we have a weight (% non-gapped) and a
    frequency vector. (If using a matrix, the frequency vector is in eigenspace).
@@ -433,6 +440,18 @@ typedef struct {
   float *support;		/* 1 for high-confidence nodes */
 } NJ_t;
 
+/* Uniquify sequences in an alignment -- map from indices
+   in the alignment to unique indicies in a NJ_t
+*/
+typedef struct {
+  int nSeq;
+  int nUnique;
+  int *uniqueFirst;		/* iUnique -> iAln */
+  int *alnNext;			/* iAln -> next, or -1  */
+  int *alnToUniq;		/* iAln -> iUnique, or -1 if another was the exemplar */
+  char **uniqueSeq;		/* indexed by iUniq -- points to strings allocated elsewhere */
+} uniquify_t;
+
 /* Describes which switch to do */
 typedef enum {ABvsCD,ACvsBD,ADvsBC} nni_t;
 
@@ -468,7 +487,7 @@ long nBetter = 0;		/* Number of hill-climbing steps */
 long nCloseUsed = 0;		/* Number of "close" neighbors we avoid full search for */
 long nRefreshTopHits = 0;	/* Number of full-blown searches (interior nodes) */
 long nVisibleReset = 0;		/* Number of resets of the visible set */
-long nNNI = 0;
+long nNNI = 0;			/* Number of NNI changes performed */
 long nSuboptimalSplits = 0;	/* Number of splits that are rejected given full topology (during bootstrap) */
 long nSuboptimalConstrained = 0; /* Bad splits that are due to constraints */
 long nConstraintViolations = 0;	/* Number of constraint violations */
@@ -487,7 +506,7 @@ distance_matrix_t *ReadDistanceMatrix(char *prefix);
 void SetupDistanceMatrix(/*IN/OUT*/distance_matrix_t *); /* set eigentot, codeFreq */
 void ReadMatrix(char *filename, /*OUT*/float codes[MAXCODES][MAXCODES], bool check_codes);
 void ReadVector(char *filename, /*OUT*/float codes[MAXCODES]);
-alignment_t *ReadAlignment(/*IN*/FILE *fp); /* Returns a list of strings (exits on failure) */
+alignment_t *ReadAlignment(/*READ*/FILE *fp); /* Returns a list of strings (exits on failure) */
 alignment_t *FreeAlignment(alignment_t *); /* returns NULL */
 
 NJ_t *InitNJ(char **sequences, int nSeqs, int nPos,
@@ -498,7 +517,6 @@ void FastNJ(/*IN/OUT*/NJ_t *NJ); /* Does the joins */
 void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ);	  /* Estimates the reliability of the joins */
 void NNI(/*IN/OUT*/NJ_t *NJ);  /* Nearest-neighbor interchanges */
 void UpdateBranchLengths(/*IN/OUT*/NJ_t *NJ); /* Recomputes all branch lengths */
-void PrintNJ(FILE *, NJ_t *NJ, char **names, int *uniqueFirst, int *nameNext);
 
 typedef struct {
   int nBadSplits;
@@ -786,6 +804,32 @@ char *GetHashString(hashstrings_t *hash, hashiterator_t hi);
 int HashCount(hashstrings_t *hash, hashiterator_t hi);
 int HashFirst(hashstrings_t *hash, hashiterator_t hi);
 
+void PrintNJ(/*WRITE*/FILE *, NJ_t *NJ, char **names, uniquify_t *unique);
+
+uniquify_t *UniquifyAln(/*IN*/alignment_t *aln);
+uniquify_t *FreeUniquify(uniquify_t *);	/* returns NULL */
+
+/* Convert a constraint alignment to a list of sequences. The returned array is indexed
+   by iUnique and points to values in the input alignment
+*/
+char **AlnToConstraints(alignment_t *constraints, uniquify_t *unique, hashstrings_t *hashnames);
+
+/* ReadTree ignores non-unique leaves after the first instance.
+   At the end, it prunes the tree to ignore empty children and it
+   unroots the tree if necessary.
+*/
+void ReadTree(/*IN/OUT*/NJ_t *NJ,
+	      /*IN*/uniquify_t *unique,
+	      /*IN*/hashstrings_t *hashnames,
+	      /*READ*/FILE *fpInTree);
+char *ReadTreeToken(/*READ*/FILE *fp); /* returns a static array, or NULL on EOF */
+void ReadTreeAddChild(int parent, int child, /*IN/OUT*/int *parents, /*IN/OUT*/children_t *children);
+/* Do not add the leaf if we already set this unique-set to another parent */
+void ReadTreeMaybeAddLeaf(int parent, char *name,
+			  hashstrings_t *hashnames, uniquify_t *unique,
+			  /*IN/OUT*/int *parents, /*IN/OUT*/children_t *children);
+void ReadTreeRemove(/*IN/OUT*/int *parents, /*IN/OUT*/children_t *children, int node);
+
 /* Routines to support tree traversal */
 typedef bool *traversal_t;
 traversal_t InitTraversal(NJ_t*);
@@ -832,6 +876,8 @@ int main(int argc, char **argv) {
   distance_matrix_t *distance_matrix = NULL;
   bool make_matrix = false;
   char *constraintsFile = NULL;
+  char *intreeFile = NULL;
+  bool intree1 = false;		/* the same starting tree each round */
   int nni = -1;			/* number of rounds of NNI, defaults to log2(n)+1 */
 
   for (iArg = 1; iArg < argc; iArg++) {
@@ -863,6 +909,13 @@ int main(int argc, char **argv) {
       }
     } else if (strcmp(argv[iArg], "-nt") == 0) {
       nCodes = 4;
+    } else if (strcmp(argv[iArg], "-intree") == 0 && iArg < argc-1) {
+      iArg++;
+      intreeFile = argv[iArg];
+    } else if (strcmp(argv[iArg], "-intree1") == 0 && iArg < argc-1) {
+      iArg++;
+      intreeFile = argv[iArg];
+      intree1 = true;
     } else if (strcmp(argv[iArg], "-nj") == 0) {
       bionj = 0;
     } else if (strcmp(argv[iArg], "-bionj") == 0) {
@@ -971,15 +1024,20 @@ int main(int argc, char **argv) {
     fprintf(stderr,"Alignment: %s", fileName != NULL ? fileName : "standard input");
     if (nAlign>1)
       fprintf(stderr, " (%d alignments)", nAlign);
-    fprintf(stderr,"\n%s distances: %s Method: %s Support: %s\nSearch: %s %s TopHits: %s\n",
+    fprintf(stderr,"\n%s distances: %s Method: %s Support: %s\n",
 	    nCodes == 20 ? "Amino acid" : "Nucleotide",
 	    matrixPrefix ? matrixPrefix : (useMatrix? "BLOSUM45 (default)"
 					   : (nCodes==4 && logdist ? "Jukes-Cantor" : "%different")),
 	    bionj ? "BIONJ" : "neighbor-joining" ,
-	    supportString,
-	    slow?"Exhaustive (slow)" : (fastest ? "Fastest" : "Normal (fast/relax)"),
-	    nniString,
-	    tophitString);
+	    supportString);
+    if (intreeFile == NULL)
+      fprintf(stderr, "Search: %s %s TopHits: %s\n",
+	      slow?"Exhaustive (slow)" : (fastest ? "Fastest" : "Normal (fast/relax)"),
+	      nniString,
+	      tophitString);
+    else
+      fprintf(stderr, "Start at tree from %s %s\n", intreeFile, nniString);
+
     if (constraintsFile != NULL)
       fprintf(stderr, "Constraints: %s Weight: %.3f\n", constraintsFile, constraintWeight);
     if (pseudoWeight > 0)
@@ -1015,6 +1073,15 @@ int main(int argc, char **argv) {
     }
   }
 
+  FILE *fpInTree = NULL;
+  if (intreeFile != NULL) {
+    fpInTree = fopen(intreeFile,"r");
+    if (fpInTree == NULL) {
+      fprintf(stderr, "Cannot read %s\n", intreeFile);
+      exit(1);
+    }
+  }
+
   for(iAln = 0; iAln < nAlign; iAln++) {
     alignment_t *aln = ReadAlignment(fpIn);
     if (aln->nSeq < 1) {
@@ -1034,43 +1101,6 @@ int main(int argc, char **argv) {
     }
 
     /* Make a list of unique sequences -- note some lists are bigger than required */
-    int nUniqueSeq = 0;
-    char **uniqueSeq = (char**)mymalloc(aln->nSeq * sizeof(char*)); /* iUnique -> seq */
-    int *uniqueFirst = (int*)mymalloc(aln->nSeq * sizeof(int)); /* iUnique -> iFirst in aln */
-    int *nameNext = (int*)mymalloc(aln->nSeq * sizeof(int)); /* i in aln -> next, or -1 */
-    int *seqToUniq = (int*)mymalloc(aln->nSeq * sizeof(int)); /* i in aln -> iUnique; many -> 1 */
-
-    for (i = 0; i < aln->nSeq; i++) {
-      uniqueSeq[i] = NULL;
-      uniqueFirst[i] = -1;
-      nameNext[i] = -1;
-      seqToUniq[i] = -1;
-    }
-    hashstrings_t *hashseqs = MakeHashtable(aln->seqs, aln->nSeq);
-    for (i=0; i<aln->nSeq; i++) {
-      hashiterator_t hi = FindMatch(hashseqs,aln->seqs[i]);
-      int first = HashFirst(hashseqs,hi);
-      if (first == i) {
-	uniqueSeq[nUniqueSeq] = aln->seqs[i];
-	uniqueFirst[nUniqueSeq] = i;
-	seqToUniq[i] = nUniqueSeq;
-	nUniqueSeq++;
-      } else {
-	int last = first;
-	while (nameNext[last] != -1)
-	  last = nameNext[last];
-	assert(last>=0);
-	nameNext[last] = i;
-	assert(seqToUniq[last] >= 0 && seqToUniq[last] < nUniqueSeq);
-	seqToUniq[i] = seqToUniq[last];
-      }
-    }
-    assert(nUniqueSeq>0);
-    hashseqs = FreeHashtable(hashseqs);
-    
-    if (verbose>1) fprintf(stderr, "read %s seqs %d (%d unique) positions %d nameLast %s seqLast %s\n",
-			   fileName ? fileName : "standard input",
-			   aln->nSeq, nUniqueSeq, aln->nPos, aln->names[aln->nSeq-1], aln->seqs[aln->nSeq-1]);
 
     clock_t clock_start = clock();
     if (make_matrix) {
@@ -1106,6 +1136,8 @@ int main(int argc, char **argv) {
       mymallocUsed = 0;
       maxmallocHeap = 0;
 
+      uniquify_t *unique = UniquifyAln(aln);
+
       /* read constraints */
       alignment_t *constraints = NULL;
       char **uniqConstraints = NULL;
@@ -1116,43 +1148,28 @@ int main(int argc, char **argv) {
 		  iAln+1, constraintsFile);
 	  constraints = FreeAlignment(constraints);
 	} else {
-	  /* look up constraints as names and map to unique-space */
-	  uniqConstraints = (char**)mymalloc(sizeof(char*) * nUniqueSeq);	
-	  int i;
-	  for (i = 0; i < nUniqueSeq; i++)
-	    uniqConstraints[i] = NULL;
-	  for (i = 0; i < constraints->nSeq; i++) {
-	    char *name = constraints->names[i];
-	    char *constraintSeq = constraints->seqs[i];
-	    hashiterator_t hi = FindMatch(hashnames,name);
-	    if (HashCount(hashnames,hi) != 1) {
-	      fprintf(stderr, "Sequence %s from constraints file is not in the alignment\n", name);
-	      exit(1);
-	    }
-	    int iSeqNonunique = HashFirst(hashnames,hi);
-	    assert(iSeqNonunique >= 0 && iSeqNonunique < aln->nSeq);
-	    int iSeqUnique = seqToUniq[iSeqNonunique];
-	    assert(iSeqUnique >= 0 && iSeqUnique < nUniqueSeq);
-	    if (uniqConstraints[iSeqUnique] != NULL) {
-	      /* Already set a constraint for this group of sequences!
-		 Warn that we are ignoring this one unless the constraints match */
-	      if (strcmp(uniqConstraints[iSeqUnique],constraintSeq) != 0) {
-		fprintf(stderr,"Warning: ignoring constraints for %s -- %s has same sequence but different constraints\n",
-			name, aln->names[iSeqUnique]);
-	      }
-	    } else {
-	      uniqConstraints[iSeqUnique] = constraintSeq;
-	    }
-	  }
+	  uniqConstraints = AlnToConstraints(constraints, unique, hashnames);
 	}
       }	/* end load constraints */
 
-      /* build tree */
-      NJ_t *NJ = InitNJ(uniqueSeq, nUniqueSeq, aln->nPos,
+      NJ_t *NJ = InitNJ(unique->uniqueSeq, unique->nUnique, aln->nPos,
 			uniqConstraints,
-			uniqConstraints != NULL ? constraints->nPos : 0,	/* nConstraints */
+			uniqConstraints != NULL ? constraints->nPos : 0, /* nConstraints */
 			distance_matrix);
-      FastNJ(NJ);
+      if (verbose>1) fprintf(stderr, "read %s seqs %d (%d unique) positions %d nameLast %s seqLast %s\n",
+			     fileName ? fileName : "standard input",
+			     aln->nSeq, unique->nUnique, aln->nPos, aln->names[aln->nSeq-1], aln->seqs[aln->nSeq-1]);
+      if (fpInTree != NULL) {
+	if (intree1)
+	  fseek(fpInTree, 0L, SEEK_SET);
+	ReadTree(/*IN/OUT*/NJ, /*IN*/unique, /*IN*/hashnames, /*READ*/fpInTree);
+	if (verbose > 1)
+	  fprintf(stderr, "Read tree from %s\n", intreeFile);
+	if (verbose >= 2)
+	  PrintNJ(stderr, NJ, aln->names, unique);
+      } else {
+	FastNJ(NJ);
+      }
 
       /* profile-frequencies for the "up-profiles" in ReliabilityNJ take only diameter(Tree)*L*a
 	 space not N*L*a space, because we can free them as we go.
@@ -1163,18 +1180,19 @@ int main(int argc, char **argv) {
       long svProfileFreqAlloc = nProfileFreqAlloc;
       long svProfileFreqAvoid = nProfileFreqAvoid;
 #endif
-
-      if (nni == -1)
-	nni = 1 + (int)(0.5 + log(NJ->nSeq)/log(2));
-      if (nni>0) {
+      int nniToDo = nni == -1 ? 1 + (int)(0.5 + log(NJ->nSeq)/log(2)) : nni;
+      if (nniToDo>0) {
 	int i;
-	if(verbose>0) fprintf(stderr, "Initial topology in %.2f sec. Doing %d rounds of nearest-neighbor interchanges\n",
-			      (clock()-clock_start)/(double)CLOCKS_PER_SEC, nni);
-	for (i=0; i < nni; i++) {
+	if(verbose>0) {
+	  if (fpInTree == NULL)
+	    fprintf(stderr, "Initial topology in %.2f seconds\n", (clock()-clock_start)/(double)CLOCKS_PER_SEC);
+	  fprintf(stderr,"Doing %d rounds of nearest-neighbor interchanges\n", nniToDo);
+	}
+	for (i=0; i < nniToDo; i++) {
 	  if(verbose>1) {
 	    fprintf(stderr, "Topology before NNI round %d\n",i);
 	    fflush(stderr);
-	    PrintNJ(stderr, NJ, aln->names, uniqueFirst, nameNext);
+	    PrintNJ(stderr, NJ, aln->names, unique);
 	  }
 	  NNI(/*IN/OUT*/NJ);
 	}
@@ -1235,18 +1253,15 @@ int main(int argc, char **argv) {
 #endif
       }
       fflush(stderr);
-      PrintNJ(stdout, NJ, aln->names, uniqueFirst, nameNext);
+      PrintNJ(stdout, NJ, aln->names, unique);
       fflush(stdout);
       FreeNJ(NJ);
       if (uniqConstraints != NULL)
-	uniqConstraints = myfree(uniqConstraints, sizeof(char*) * nUniqueSeq);
+	uniqConstraints = myfree(uniqConstraints, sizeof(char*) * unique->nUnique);
       constraints = FreeAlignment(constraints);
+      unique = FreeUniquify(unique);
     } /* end build tree */
     hashnames = FreeHashtable(hashnames);
-    uniqueSeq = myfree(uniqueSeq, aln->nSeq * sizeof(char*));
-    uniqueFirst = myfree(uniqueFirst, aln->nSeq * sizeof(int));
-    nameNext = myfree(nameNext, aln->nSeq * sizeof(int));
-    seqToUniq = myfree(seqToUniq, aln->nSeq * sizeof(int));
     aln = FreeAlignment(aln);
   } /* end loop over alignments */
   exit(0);
@@ -1799,23 +1814,385 @@ void FastNJSearch(NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *besthits, /*OUT*/b
   }
 }
 
-void PrintNJ(FILE *fp, NJ_t *NJ, char **names,
-	     int *uniqueFirst,  /* index in NJ to first index in names */
-	     int *nameNext	/* index in names to next index in names or -1 */
-	     ) {
+/* A token is one of ():;, or an alphanumeric string without whitespace
+   Any whitespace between tokens is ignored */
+char *ReadTreeToken(FILE *fp) {
+  static char buf[BUFFER_SIZE];
+  int len = 0;
+  int c;
+  for (c = fgetc(fp); c != EOF; c = fgetc(fp)) {
+    if (c == '(' || c == ')' || c == ':' || c == ';' || c == ',') {
+      /* standalone token */
+      if (len == 0) {
+	buf[len++] = c;
+	buf[len] = '\0';
+	return(buf);
+      } else {
+	ungetc(c, fp);
+	buf[len] = '\0';
+	return(buf);
+      }
+    } else if (isspace(c)) {
+      if (len > 0) {
+	buf[len] = '\0';
+	return(buf);
+      }
+      /* else ignore whitespace at beginning of token */
+    } else {
+      /* not whitespace or standalone token */
+      buf[len++] = c;
+      if (len >= BUFFER_SIZE) {
+	buf[BUFFER_SIZE-1] = '\0';
+	fprintf(stderr, "Token too long in tree file, token begins with\n%s\n", buf);
+	exit(1);
+      }
+    }
+  }
+  if (len > 0) {
+    /* return the token we have so far */
+    buf[len] = '\0';
+    return(buf);
+  }
+  /* else */
+  return(NULL);
+}
+
+void ReadTreeError(char *err, char *token) {
+  fprintf(stderr, "Tree parse error: unexpected token '%s' -- %s\n",
+	  token == NULL ? "(End of file)" : token,
+	  err);
+  exit(1);
+}
+
+void ReadTreeAddChild(int parent, int child, /*IN/OUT*/int *parents, /*IN/OUT*/children_t *children) {
+  assert(parent >= 0);
+  assert(child >= 0);
+  assert(parents[child] < 0);
+  assert(children[parent].nChild < 3);
+  parents[child] = parent;
+  children[parent].child[children[parent].nChild++] = child;
+}
+
+void ReadTreeMaybeAddLeaf(int parent, char *name,
+			  hashstrings_t *hashnames, uniquify_t *unique,
+			  /*IN/OUT*/int *parents, /*IN/OUT*/children_t *children) {
+  hashiterator_t hi = FindMatch(hashnames,name);
+  if (HashCount(hashnames,hi) != 1)
+    ReadTreeError("not recognized as a sequence name", name);
+
+  int iSeqNonunique = HashFirst(hashnames,hi);
+  assert(iSeqNonunique >= 0 && iSeqNonunique < unique->nSeq);
+  int iSeqUnique = unique->alnToUniq[iSeqNonunique];
+  assert(iSeqUnique >= 0 && iSeqUnique < unique->nUnique);
+  /* Either record this leaves' parent (if it is -1) or ignore this leaf (if already seen) */
+  if (parents[iSeqUnique] < 0) {
+    ReadTreeAddChild(parent, iSeqUnique, /*IN/OUT*/parents, /*IN/OUT*/children);
+    if(verbose > 5)
+      fprintf(stderr, "Found leaf uniq%d name %s child of %d\n", iSeqUnique, name, parent);
+  } else {
+    if (verbose > 5)
+      fprintf(stderr, "Skipped redundant leaf uniq%d name %s\n", iSeqUnique, name);
+  }
+}
+
+void ReadTreeRemove(/*IN/OUT*/int *parents, /*IN/OUT*/children_t *children, int node) {
+  if(verbose > 5)
+    fprintf(stderr,"Removing node %d parent %d\n", node, parents[node]);
+  assert(parents[node] >= 0);
+  int parent = parents[node];
+  parents[node] = -1;
+  children_t *pc = &children[parent];
+  int oldn;
+  for (oldn = 0; oldn < pc->nChild; oldn++) {
+    if (pc->child[oldn] == node)
+      break;
+  }
+  assert(oldn < pc->nChild);
+
+  /* move successor nodes back in child list and shorten list */
+  int i;
+  for (i = oldn; i < pc->nChild-1; i++)
+    pc->child[i] = pc->child[i+1];
+  pc->nChild--;
+
+  /* add its children to parent's child list */
+  children_t *nc = &children[node];
+  if (nc->nChild > 0) {
+    assert(nc->nChild<=2);
+    assert(pc->nChild < 3);
+    assert(pc->nChild + nc->nChild <= 3);
+    int j;
+    for (j = 0; j < nc->nChild; j++) {
+      if(verbose > 5)
+	fprintf(stderr,"Repointing parent %d to child %d\n", parent, nc->child[j]);
+      pc->child[pc->nChild++] = nc->child[j];
+      parents[nc->child[j]] = parent;
+    }
+    nc->nChild = 0;
+  }
+}  
+
+void ReadTree(/*IN/OUT*/NJ_t *NJ,
+	      /*IN*/uniquify_t *unique,
+	      /*IN*/hashstrings_t *hashnames,
+	      /*READ*/FILE *fpInTree) {
+  assert(NJ->nSeq == unique->nUnique);
+  /* First, do a preliminary parse of the tree to with non-unique leaves ignored
+     We need to store this separately from NJ because it may have too many internal nodes
+     (matching sequences show up once in the NJ but could be in multiple places in the tree)
+     Will use iUnique as the index of nodes, as in the NJ structure
+  */
+  int maxnodes = unique->nSeq*2;
+  int maxnode = unique->nSeq;
+  int *parent = (int*)mymalloc(sizeof(int)*maxnodes);
+  children_t *children = (children_t *)mymalloc(sizeof(children_t)*maxnodes);
+  int root = maxnode++;
+  int i;
+  for (i = 0; i < maxnodes; i++) {
+    parent[i] = -1;
+    children[i].nChild = 0;
+  }
+
+  /* The stack is the current path to the root, with the root at the first (top) position */
+  int stack_size = 1;
+  int *stack = (int*)mymalloc(sizeof(int)*maxnodes);
+  stack[0] = root;
+  int nDown = 0;
+  int nUp = 0;
+
+  char *token;
+  token = ReadTreeToken(fpInTree);
+  if (token == NULL || *token != '(')
+    ReadTreeError("No '(' at start", token);
+  /* nDown is still 0 because we have created the root */
+
+  while ((token = ReadTreeToken(fpInTree)) != NULL) {
+    if (nDown > 0) {		/* In a stream of parentheses */
+      if (*token == '(')
+	nDown++;
+      else if (*token == ',' || *token == ';' || *token == ':' || *token == ')')
+	ReadTreeError("while reading parentheses", token);
+      else {
+	/* Add intermediate nodes if nDown was > 1 (for nDown=1, the only new node is the leaf) */
+	while (nDown-- > 0) {
+	  int new = maxnode++;
+	  assert(new < maxnodes);
+	  ReadTreeAddChild(stack[stack_size-1], new, /*IN/OUT*/parent, /*IN/OUT*/children);
+	  if(verbose > 5)
+	    fprintf(stderr, "Added internal child %d of %d, stack size increase to %d\n",
+		    new, stack[stack_size-1],stack_size+1);
+	  stack[stack_size++] = new;
+	  assert(stack_size < maxnodes);
+	}
+	ReadTreeMaybeAddLeaf(stack[stack_size-1], token,
+			     hashnames, unique,
+			     /*IN/OUT*/parent, /*IN/OUT*/children);
+      }
+    } else if (nUp > 0) {
+      if (*token == ';') {	/* end the tree? */
+	if (nUp != stack_size)
+	  ReadTreeError("unbalanced parentheses", token);
+	else
+	  break;
+      } else if (*token == ')')
+	nUp++;
+      else if (*token == '(')
+	ReadTreeError("unexpected '(' after ')'", token);
+      else if (*token == ':') {
+	token = ReadTreeToken(fpInTree);
+	/* Read the branch length and ignore it */
+	if (token == NULL || (*token != '-' && !isdigit(*token)))
+	  ReadTreeError("not recognized as a branch length", token);
+      } else if (*token == ',') {
+	/* Go back up the stack the correct #times */
+	while (nUp-- > 0) {
+	  stack_size--;
+	  if(verbose > 5)
+	    fprintf(stderr, "Up to nUp=%d stack size %d at %d\n",
+		    nUp, stack_size, stack[stack_size-1]);
+	  if (stack_size <= 0)
+	    ReadTreeError("too many ')'", token);
+	}
+	nUp = 0;
+      } else if (*token == '-' || isdigit(*token))
+	; 			/* ignore bootstrap value */
+      else
+	fprintf(stderr, "Warning while parsing tree: non-numeric label %s for internal node\n",
+		token);
+    } else if (*token == '(') {
+      nDown = 1;
+    } else if (*token == ')') {
+      nUp = 1;
+    } else if (*token == ':') {
+      token = ReadTreeToken(fpInTree);
+      if (token == NULL || (*token != '-' && !isdigit(*token)))
+	ReadTreeError("not recognized as a branch length", token);
+    } else if (*token == ',') {
+      ;				/* do nothing */
+    } else if (*token == ';')
+      ReadTreeError("unexpected token", token);
+    else
+      ReadTreeMaybeAddLeaf(stack[stack_size-1], token,
+			   hashnames, unique,
+			   /*IN/OUT*/parent, /*IN/OUT*/children);
+  }
+
+  /* Verify that all sequences were seen */
+  for (i = 0; i < unique->nUnique; i++) {
+    if (parent[i] < 0) {
+      fprintf(stderr, "Alignment sequence %d (unique %d) absent from input tree\n", unique->uniqueFirst[i], i);
+      exit(1);
+    }
+  }
+
+  /* Simplify the tree -- remove all internal nodes with < 2 children
+     Keep trying until no nodes get removed
+  */
+  int nRemoved;
+  do {
+    nRemoved = 0;
+    /* Here stack is the list of nodes we haven't visited yet while doing
+       a tree traversal */
+    stack_size = 1;
+    stack[0] = root;
+    while (stack_size > 0) {
+      int node = stack[--stack_size];
+      if (node >= unique->nUnique) { /* internal node */
+	if (children[node].nChild <= 1) {
+	  if (node != root) {
+	    ReadTreeRemove(/*IN/OUT*/parent,/*IN/OUT*/children,node);
+	    nRemoved++;
+	  } else if (node == root && children[node].nChild == 1) {
+	    int newroot = children[node].child[0];
+	    parent[newroot] = -1;
+	    children[root].nChild = 0;
+	    nRemoved++;
+	    if(verbose > 5)
+	      fprintf(stderr,"Changed root from %d to %d\n",root,newroot);
+	    root = newroot;
+	    stack[stack_size++] = newroot;
+	  }
+	} else {
+	  int j;
+	  for (j = 0; j < children[node].nChild; j++) {
+	    assert(stack_size < maxnodes);
+	    stack[stack_size++] = children[node].child[j];
+	    if(verbose > 5)
+	      fprintf(stderr,"Added %d to stack\n", stack[stack_size-1]);
+	  }
+	}
+      }
+    }
+  } while (nRemoved > 0);
+
+  /* Simplify the root node to 3 children if it has 2 */
+  if (children[root].nChild == 2) {
+    for (i = 0; i < 2; i++) {
+      int child = children[root].child[i];
+      assert(child >= 0 && child < maxnodes);
+      if (children[child].nChild == 2) {
+	ReadTreeRemove(parent,children,child); /* replace root -> child -> A,B with root->A,B */
+	break;
+      }
+    }
+  }
+
+  for (i = 0; i < maxnodes; i++)
+    if(verbose > 5)
+      fprintf(stderr,"Simplfied node %d has parent %d nchild %d\n",
+	      i, parent[i], children[i].nChild);
+
+  /* Map the remaining internal nodes to NJ nodes */
+  int *map = (int*)mymalloc(sizeof(int)*maxnodes);
+  for (i = 0; i < unique->nUnique; i++)
+    map[i] = i;
+  for (i = unique->nUnique; i < maxnodes; i++)
+    map[i] = -1;
+  stack_size = 1;
+  stack[0] = root;
+  while (stack_size > 0) {
+    int node = stack[--stack_size];
+    if (node >= unique->nUnique) { /* internal node */
+      assert(node == root || children[node].nChild > 1);
+      map[node] =  NJ->maxnode++;
+      for (i = 0; i < children[node].nChild; i++) {
+	assert(stack_size < maxnodes);
+	stack[stack_size++] = children[node].child[i];
+      }
+    }
+  }
+  for (i = 0; i < maxnodes; i++)
+    if(verbose > 5)
+      fprintf(stderr,"Map %d to %d (parent %d nchild %d)\n",
+	      i, map[i], parent[i], children[i].nChild);
+
+  /* Set NJ->parent, NJ->children, NJ->root */
+  NJ->root = map[root];
+  int node;
+  for (node = 0; node < maxnodes; node++) {
+    int njnode = map[node];
+    if (njnode >= 0) {
+      NJ->child[njnode].nChild = children[node].nChild;
+      for (i = 0; i < children[node].nChild; i++) {
+	assert(children[node].child[i] >= 0 && children[node].child[i] < maxnodes);
+	NJ->child[njnode].child[i] = map[children[node].child[i]];
+      }
+      if (parent[node] >= 0)
+	NJ->parent[njnode] = map[parent[node]];
+    }
+  }
+
+  /* Make sure that parent/child relationships match */
+  for (i = 0; i < NJ->maxnode; i++) {
+    children_t *c = &NJ->child[i];
+    int j;
+    for (j = 0; j < c->nChild;j++)
+      assert(c->child[j] >= 0 && c->child[j] < NJ->maxnode && NJ->parent[c->child[j]] == i);
+  }
+  assert(NJ->parent[NJ->root] < 0);
+
+  map = myfree(map,sizeof(int)*maxnodes);
+  stack = myfree(stack,sizeof(int)*maxnodes);
+  children = myfree(children,sizeof(children_t)*maxnodes);
+  parent = myfree(parent,sizeof(int)*maxnodes);
+
+  /* Compute profiles as balanced -- the NNI stage will recompute these
+     profiles anyway
+  */
+  traversal_t traversal = InitTraversal(NJ);
+  node = NJ->root;
+  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
+    if (node < NJ->nSeq || node == NJ->root)
+      continue; 		/* nothing to do for leaves or root */
+    children_t *c = &NJ->child[node];
+    assert(c->nChild == 2);
+    assert(NJ->profiles[c->child[0]] != NULL);
+    assert(NJ->profiles[c->child[1]] != NULL);
+    NJ->profiles[node] = AverageProfile(NJ->profiles[c->child[0]],
+					NJ->profiles[c->child[1]],
+					NJ->nPos, NJ->nConstraints,
+					NJ->distance_matrix,
+					/*noweight*/-1.0);
+  }
+  traversal = FreeTraversal(traversal,NJ);
+}
+  
+void PrintNJ(FILE *fp, NJ_t *NJ, char **names, uniquify_t *unique) {
   /* And print the tree: depth first search
    * The stack contains
    * list of remaining children with their depth
    * parent node, with a flag of -1 so I know to print right-paren
    */
-  if (NJ->nSeq==1 && nameNext[uniqueFirst[0]] >= 0) {
+  if (NJ->nSeq==1 && unique->alnNext[unique->uniqueFirst[0]] >= 0) {
     /* Special case -- otherwise we end up with double parens */
-    int first = uniqueFirst[0];
+    int first = unique->uniqueFirst[0];
+    assert(first >= 0 && first < unique->nSeq);
     fprintf(fp,"(%s:0.0",names[first]);
-    int iName = nameNext[first];
+    int iName = unique->alnNext[first];
     while (iName >= 0) {
+      assert(iName < unique->nSeq);
       fprintf(fp,",%s:0.0",names[iName]);
-      iName = nameNext[iName];
+      iName = unique->alnNext[iName];
     }
     fprintf(fp,");\n");
     return;
@@ -1836,17 +2213,18 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names,
 
     if (node < NJ->nSeq) {
       if (NJ->child[NJ->parent[node]].child[0] != node) fputs(",",fp);
-      int first = uniqueFirst[node];
-      assert(first >= 0);
+      int first = unique->uniqueFirst[node];
+      assert(first >= 0 && first < unique->nSeq);
       /* Print the name, or the subtree of duplicate names */
-      if (nameNext[first] == -1) {
-	fprintf(fp, names[uniqueFirst[node]]);
+      if (unique->alnNext[first] == -1) {
+	fprintf(fp, names[first]);
       } else {
 	fprintf(fp,"(%s:0.0",names[first]);
-	int iName = nameNext[first];
+	int iName = unique->alnNext[first];
 	while (iName >= 0) {
+	  assert(iName < unique->nSeq);
 	  fprintf(fp,",%s:0.0",names[iName]);
-	  iName = nameNext[iName];
+	  iName = unique->alnNext[iName];
 	}
 	fprintf(fp,")");
       }
@@ -2110,6 +2488,41 @@ alignment_t *FreeAlignment(alignment_t *aln) {
   myfree(aln, sizeof(alignment_t));
   return(NULL);
 }
+
+char **AlnToConstraints(alignment_t *constraints, uniquify_t *unique, hashstrings_t *hashnames) {
+  /* look up constraints as names and map to unique-space */
+  char **  uniqConstraints = (char**)mymalloc(sizeof(char*) * unique->nUnique);	
+  int i;
+  for (i = 0; i < unique->nUnique; i++)
+    uniqConstraints[i] = NULL;
+  for (i = 0; i < constraints->nSeq; i++) {
+    char *name = constraints->names[i];
+    char *constraintSeq = constraints->seqs[i];
+    hashiterator_t hi = FindMatch(hashnames,name);
+    if (HashCount(hashnames,hi) != 1) {
+      fprintf(stderr, "Sequence %s from constraints file is not in the alignment\n", name);
+      exit(1);
+    }
+    int iSeqNonunique = HashFirst(hashnames,hi);
+    assert(iSeqNonunique >= 0 && iSeqNonunique < unique->nSeq);
+    int iSeqUnique = unique->alnToUniq[iSeqNonunique];
+    assert(iSeqUnique >= 0 && iSeqUnique < unique->nUnique);
+    if (uniqConstraints[iSeqUnique] != NULL) {
+      /* Already set a constraint for this group of sequences!
+	 Warn that we are ignoring this one unless the constraints match */
+      if (strcmp(uniqConstraints[iSeqUnique],constraintSeq) != 0) {
+	fprintf(stderr,
+		"Warning: ignoring constraints for %s:\n%s\n"
+		"Another sequence has the same sequence but different constraints\n",
+		name, constraintSeq);
+      }
+    } else {
+      uniqConstraints[iSeqUnique] = constraintSeq;
+    }
+  }
+  return(uniqConstraints);
+}
+
 
 profile_t *SeqToProfile(/*IN/OUT*/NJ_t *NJ,
 			char *seq, int nPos,
@@ -4418,6 +4831,63 @@ int HashFirst(hashstrings_t *hash, hashiterator_t hi) {
   return(hash->buckets[hi].first);
 }
 
+uniquify_t *UniquifyAln(alignment_t *aln) {
+    int nUniqueSeq = 0;
+    char **uniqueSeq = (char**)mymalloc(aln->nSeq * sizeof(char*)); /* iUnique -> seq */
+    int *uniqueFirst = (int*)mymalloc(aln->nSeq * sizeof(int)); /* iUnique -> iFirst in aln */
+    int *alnNext = (int*)mymalloc(aln->nSeq * sizeof(int)); /* i in aln -> next, or -1 */
+    int *alnToUniq = (int*)mymalloc(aln->nSeq * sizeof(int)); /* i in aln -> iUnique; many -> -1 */
+
+    int i;
+    for (i = 0; i < aln->nSeq; i++) {
+      uniqueSeq[i] = NULL;
+      uniqueFirst[i] = -1;
+      alnNext[i] = -1;
+      alnToUniq[i] = -1;
+    }
+    hashstrings_t *hashseqs = MakeHashtable(aln->seqs, aln->nSeq);
+    for (i=0; i<aln->nSeq; i++) {
+      hashiterator_t hi = FindMatch(hashseqs,aln->seqs[i]);
+      int first = HashFirst(hashseqs,hi);
+      if (first == i) {
+	uniqueSeq[nUniqueSeq] = aln->seqs[i];
+	uniqueFirst[nUniqueSeq] = i;
+	alnToUniq[i] = nUniqueSeq;
+	nUniqueSeq++;
+      } else {
+	int last = first;
+	while (alnNext[last] != -1)
+	  last = alnNext[last];
+	assert(last>=0);
+	alnNext[last] = i;
+	assert(alnToUniq[last] >= 0 && alnToUniq[last] < nUniqueSeq);
+	alnToUniq[i] = alnToUniq[last];
+      }
+    }
+    assert(nUniqueSeq>0);
+    hashseqs = FreeHashtable(hashseqs);
+
+    uniquify_t *uniquify = (uniquify_t*)mymalloc(sizeof(uniquify_t));
+    uniquify->nSeq = aln->nSeq;
+    uniquify->nUnique = nUniqueSeq;
+    uniquify->uniqueFirst = uniqueFirst;
+    uniquify->alnNext = alnNext;
+    uniquify->alnToUniq = alnToUniq;
+    uniquify->uniqueSeq = uniqueSeq;
+    return(uniquify);
+}
+
+uniquify_t *FreeUniquify(uniquify_t *unique) {
+  if (unique != NULL) {
+    myfree(unique->uniqueFirst, sizeof(int)*unique->nSeq);
+    myfree(unique->alnNext, sizeof(int)*unique->nSeq);
+    myfree(unique->alnToUniq, sizeof(int)*unique->nSeq);
+    myfree(unique->uniqueSeq, sizeof(char*)*unique->nSeq);
+    myfree(unique,sizeof(uniquify_t));
+    unique = NULL;
+  }
+  return(unique);
+}
 
 traversal_t InitTraversal(NJ_t *NJ) {
   traversal_t worked = (bool*)mymalloc(sizeof(bool)*NJ->maxnodes);
@@ -4590,4 +5060,4 @@ distance_matrix_t matrixBLOSUM45 =
     },
     /*eigentot and codeFreq left out, these are initialized elsewhere*/
   };
-    
+ 
