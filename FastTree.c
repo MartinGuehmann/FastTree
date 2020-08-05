@@ -317,7 +317,7 @@
 #define IS_ALIGNED(X) 1
 #endif
 
-#define FT_VERSION "2.1.1"
+#define FT_VERSION "2.1.2"
 
 char *usage =
   "  FastTree protein_alignment > tree\n"
@@ -1804,7 +1804,7 @@ int main(int argc, char **argv) {
       break;
   }
   if(iArg < argc-1) {
-    fprintf(stderr, usage);
+    fprintf(stderr, "%s", usage);
     exit(1);
   }
 
@@ -3476,7 +3476,7 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names, uniquify_t *unique, bool bShowSup
       assert(first >= 0 && first < unique->nSeq);
       /* Print the name, or the subtree of duplicate names */
       if (unique->alnNext[first] == -1) {
-	fprintf(fp, names[first]);
+	fprintf(fp, "%s", names[first]);
       } else {
 	fprintf(fp,"(%s:0.0",names[first]);
 	int iName = unique->alnNext[first];
