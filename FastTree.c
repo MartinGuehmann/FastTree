@@ -298,14 +298,29 @@
 #include <malloc.h>
 #endif
 
+/* Compile with -DOPENMP to turn on multithreading */
 #ifdef OPENMP
 #include <omp.h>
 #endif
 
+/* By default, tries to compile with SSE instructions for greater speed.
+   But if compiled with -DUSE_DOUBLE, uses double precision instead of single-precision
+   floating point (2x memroy required), and does not use SSE.
+*/
 #ifdef __SSE__
-#ifndef NO_SSE
+#if !defined(NO_SSE) && !defined(USE_DOUBLE)
 #define USE_SSE3
 #endif
+#endif
+
+
+#ifdef USE_DOUBLE
+#define SSE_STRING "Double precision (No SSE3)"
+typedef double numeric_t;
+#define ScanNumericSpec "%lf"
+#else
+typedef float numeric_t;
+#define ScanNumericSpec "%f"
 #endif
 
 #ifdef USE_SSE3
@@ -313,13 +328,19 @@
 #define ALIGNED __attribute__((aligned(16)))
 #define IS_ALIGNED(X) ((((unsigned long) new) & 15L) == 0L)
 #include <xmmintrin.h>
+
 #else
-#define SSE_STRING "No SSE3"
+
 #define ALIGNED 
 #define IS_ALIGNED(X) 1
+
+#ifndef USE_DOUBLE
+#define SSE_STRING "No SSE3"
 #endif
 
-#define FT_VERSION "2.1.6"
+#endif /* USE_SSE3 */
+
+#define FT_VERSION "2.1.7"
 
 char *usage =
   "  FastTree protein_alignment > tree\n"
@@ -538,11 +559,11 @@ typedef struct {
 */
 typedef struct {
   /* alignment profile */
-  float *weights;
+  numeric_t *weights;
   unsigned char *codes;
-  float *vectors;		/* NULL if no non-constant positions, e.g. for leaves */
+  numeric_t *vectors;		/* NULL if no non-constant positions, e.g. for leaves */
   int nVectors;
-  float *codeDist;		/* Optional -- distance to each code at each position */
+  numeric_t *codeDist;		/* Optional -- distance to each code at each position */
 
   /* constraint profile */
   int *nOn;
@@ -562,12 +583,12 @@ typedef struct {
 */
 typedef struct {
   int i, j;
-  float weight;			/* Total product of weights (maximum value is nPos)
+  numeric_t weight;			/* Total product of weights (maximum value is nPos)
 				   This is needed for weighted joins and for pseudocounts,
 				   but not in most other places.
 				   For example, it is not maintained by the top hits code */
-  float dist;			/* The uncorrected distance (includes diameter correction) */
-  float criterion;		/* changes when we update the out-profile or change nActive */
+  numeric_t dist;			/* The uncorrected distance (includes diameter correction) */
+  numeric_t criterion;		/* changes when we update the out-profile or change nActive */
 } besthit_t;
 
 typedef struct {
@@ -577,25 +598,25 @@ typedef struct {
 
 typedef struct {
   /* Distances between amino acids */
-  float distances[MAXCODES][MAXCODES];
+  numeric_t distances[MAXCODES][MAXCODES];
 
   /* Inverse of the eigenvalue matrix, for rotating a frequency vector
      into eigenspace so that profile similarity computations are
      O(alphabet) not O(alphabet*alphabet) time.
   */
-  float eigeninv[MAXCODES][MAXCODES];
-  float eigenval[MAXCODES];	/* eigenvalues */
+  numeric_t eigeninv[MAXCODES][MAXCODES];
+  numeric_t eigenval[MAXCODES];	/* eigenvalues */
 
 
   /* eigentot=eigeninv times the all-1s frequency vector
      useful for normalizing rotated frequency vectors
   */
-  float eigentot[MAXCODES];	
+  numeric_t eigentot[MAXCODES];	
 
   /* codeFreq is the transpose of the eigeninv matrix is
      the rotated frequency vector for each code */
-  float codeFreq[MAXCODES][MAXCODES];
-  float gapFreq[MAXCODES];
+  numeric_t codeFreq[MAXCODES][MAXCODES];
+  numeric_t gapFreq[MAXCODES];
 } distance_matrix_t;
 
 
@@ -650,22 +671,22 @@ typedef struct {
    = codeFreq(A) * w/stat(A) + nearFreq(A) * (1-w)
  */
 typedef struct {
-  float stat[MAXCODES]; /* The stationary distribution */
-  float statinv[MAXCODES];	/* 1/stat */
+  numeric_t stat[MAXCODES]; /* The stationary distribution */
+  numeric_t statinv[MAXCODES];	/* 1/stat */
   /* the eigenmatrix, with the eigenvectors as columns and rotations of individual
      characters as rows. Also includes a NOCODE entry for gaps */
-  float codeFreq[NOCODE+1][MAXCODES];
-  float eigeninv[MAXCODES][MAXCODES]; /* Inverse of eigenmatrix */
-  float eigeninvT[MAXCODES][MAXCODES]; /* transpose of eigeninv */
-  float eigenval[MAXCODES];	/* Eigenvalues  */
+  numeric_t codeFreq[NOCODE+1][MAXCODES];
+  numeric_t eigeninv[MAXCODES][MAXCODES]; /* Inverse of eigenmatrix */
+  numeric_t eigeninvT[MAXCODES][MAXCODES]; /* transpose of eigeninv */
+  numeric_t eigenval[MAXCODES];	/* Eigenvalues  */
   /* These are for approximate posteriors (off by default) */
-  float nearP[MAXCODES][MAXCODES]; /* nearP[i][j] = P(parent=j | both children are i, both lengths are 0.1 */
-  float nearFreq[MAXCODES][MAXCODES]; /* rotation of nearP/stat */
+  numeric_t nearP[MAXCODES][MAXCODES]; /* nearP[i][j] = P(parent=j | both children are i, both lengths are 0.1 */
+  numeric_t nearFreq[MAXCODES][MAXCODES]; /* rotation of nearP/stat */
 } transition_matrix_t;
 
 typedef struct {
   int nRateCategories;
-  float *rates;			/* 1 per rate category */
+  numeric_t *rates;			/* 1 per rate category */
   unsigned int *ratecat;	/* 1 category per position */
 } rates_t;
 
@@ -687,10 +708,10 @@ typedef struct {
   int maxnode;			/* The next index to allocate */
   int maxnodes;			/* Space allocated in data structures below */
   profile_t **profiles;         /* Profiles of leaves and intermediate nodes */
-  float *diameter;		/* To correct for distance "up" from children (if any) */
-  float *varDiameter;		/* To correct variances for distance "up" */
-  float *selfdist;		/* Saved for use in some formulas */
-  float *selfweight;		/* Saved for use in some formulas */
+  numeric_t *diameter;		/* To correct for distance "up" from children (if any) */
+  numeric_t *varDiameter;		/* To correct variances for distance "up" */
+  numeric_t *selfdist;		/* Saved for use in some formulas */
+  numeric_t *selfweight;		/* Saved for use in some formulas */
 
   /* Average profile of all active nodes, the "outprofile"
    * If all inputs are ungapped, this has weight 1 (not nSequences) at each position
@@ -700,15 +721,15 @@ typedef struct {
   double totdiam;
 
   /* We sometimes use stale out-distances, so we remember what nActive was  */
-  float *outDistances;		/* Sum of distances to other active (parent==-1) nodes */
+  numeric_t *outDistances;		/* Sum of distances to other active (parent==-1) nodes */
   int *nOutDistActive;		/* What nActive was when this outDistance was computed */
 
   /* the inferred tree */
   int root;			/* index of the root. Unlike other internal nodes, it has 3 children */
   int *parent;			/* -1 or index of parent */
   children_t *child;
-  float *branchlength;		/* Distance to parent */
-  float *support;		/* 1 for high-confidence nodes */
+  numeric_t *branchlength;		/* Distance to parent */
+  numeric_t *support;		/* 1 for high-confidence nodes */
 
   /* auxilliary data for maximum likelihood (defaults to 1 category of rate=1.0) */
   rates_t rates;
@@ -743,7 +764,7 @@ typedef struct {
  */
 typedef struct {
   int j;
-  float dist;
+  numeric_t dist;
 } hit_t;
 
 typedef struct {
@@ -820,15 +841,25 @@ bool fastNNI = true;
 bool gammaLogLk = false;	/* compute gamma likelihood without reoptimizing branch lengths? */
 
 /* Maximum likelihood options and constants */
+/* These are used to rescale likelihood values and avoid taking a logarithm at each position */
 const double LkUnderflow = 1.0e-4;
 const double LkUnderflowInv = 1.0e4;
-const double LogLkUnderflow = 9.21034037197618;
+const double LogLkUnderflow = 9.21034037197618; /* -log(LkUnderflowInv) */
 const double Log2 = 0.693147180559945;
+/* These are used to limit the optimization of branch lengths.
+   Also very short branch lengths can create numerical problems.
+   In version 2.1.7., the minimum branch lengths (MLMinBranchLength and MLMinRelBranchLength)
+   were increased to prevent numerical problems in rare cases.
+   If compiled with -DUSE_DOUBLE then these minimums could be decreased.
+*/
+const double MLMinBranchLengthTolerance = 1.0e-4; /* absolute tolerance for optimizing branch lengths */
 const double MLFTolBranchLength = 0.001; /* fractional tolerance for optimizing branch lengths */
-const double MLMinBranchLength = 1.0e-4; /* also the absolute tolerance for optimizing lengths */
-const double MLMinRelBranchLength = 5.0e-5; /* minimum of rate * length */
+const double MLMinBranchLength = 5.0e-4;
+const double MLMinRelBranchLength = 2.5e-4; /* minimum of rate * length */
+
 int mlAccuracy = 1;		/* Rounds of optimization of branch lengths; 1 means do 2nd round only if close */
-double closeLogLkLimit = 5.0;	/* If log-lk is off by this much from current choice, do not optimize further */
+double closeLogLkLimit = 5.0;	/* If partial optimization of an NNI looks like it would decrease the log likelihood
+				   by this much or more then do not optimize it further */
 double treeLogLkDelta = 0.1;	/* Give up if tree log-lk changes by less than this; NNIs that change
 				   likelihood by less than this also are considered unimportant
 				   by some heuristics */
@@ -872,8 +903,8 @@ unsigned char *codesString = NULL;
 
 distance_matrix_t *ReadDistanceMatrix(char *prefix);
 void SetupDistanceMatrix(/*IN/OUT*/distance_matrix_t *); /* set eigentot, codeFreq, gapFreq */
-void ReadMatrix(char *filename, /*OUT*/float codes[MAXCODES][MAXCODES], bool check_codes);
-void ReadVector(char *filename, /*OUT*/float codes[MAXCODES]);
+void ReadMatrix(char *filename, /*OUT*/numeric_t codes[MAXCODES][MAXCODES], bool check_codes);
+void ReadVector(char *filename, /*OUT*/numeric_t codes[MAXCODES]);
 alignment_t *ReadAlignment(/*READ*/FILE *fp, bool bQuote); /* Returns a list of strings (exits on failure) */
 alignment_t *FreeAlignment(alignment_t *); /* returns NULL */
 void FreeAlignmentSeqs(/*IN/OUT*/alignment_t *);
@@ -1115,21 +1146,21 @@ void AllocRateCategories(/*IN/OUT*/rates_t *rates, int nRateCategories, int nPos
    In that case, returns an arbitrary large number.
 */
 double ProfileDistPiece(unsigned int code1, unsigned int code2,
-			float *f1, float *f2, 
+			numeric_t *f1, numeric_t *f2, 
 			/*OPTIONAL*/distance_matrix_t *dmat,
-			/*OPTIONAL*/float *codeDist2);
+			/*OPTIONAL*/numeric_t *codeDist2);
 
 /* Adds (or subtracts, if weight is negative) fIn/codeIn from fOut
    fOut is assumed to exist (as from an outprofile)
    do not call unless weight of input profile > 0
  */
-void AddToFreq(/*IN/OUT*/float *fOut, double weight,
-	       unsigned int codeIn, /*OPTIONAL*/float *fIn,
+void AddToFreq(/*IN/OUT*/numeric_t *fOut, double weight,
+	       unsigned int codeIn, /*OPTIONAL*/numeric_t *fIn,
 	       /*OPTIONAL*/distance_matrix_t *dmat);
 
 /* Divide the vector (of length nCodes) by a constant
    so that the total (unrotated) frequency is 1.0 */
-void NormalizeFreq(/*IN/OUT*/float *freq, distance_matrix_t *distance_matrix);
+void NormalizeFreq(/*IN/OUT*/numeric_t *freq, distance_matrix_t *distance_matrix);
 
 /* Allocate, if necessary, and recompute the codeDist*/
 void SetCodeDist(/*IN/OUT*/profile_t *profile, int nPos, distance_matrix_t *dmat);
@@ -1256,7 +1287,7 @@ nni_t MLQuartetNNI(profile_t *profiles[4],
 		   /*OPTIONAL*/transition_matrix_t *transmat, rates_t *rates,
 		   int nPos, int nConstraints,
 		   /*OUT*/double criteria[3], /* The three potential quartet log-likelihoods */
-		   /*IN/OUT*/float length[5],
+		   /*IN/OUT*/numeric_t length[5],
 		   bool bFast);
 
 void OptimizeAllBranchLengths(/*IN/OUT*/NJ_t *NJ);
@@ -1270,20 +1301,20 @@ double MLQuartetLogLk(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD
 void SetMLRates(/*IN/OUT*/NJ_t *NJ, int nRateCategories);
 
 /* Returns a set of nRateCategories potential rates; the caller must free it */
-float *MLSiteRates(int nRateCategories);
+numeric_t *MLSiteRates(int nRateCategories);
 
 /* returns site_loglk so that
    site_loglk[nPos*iRate + j] is the log likelihood of site j with rate iRate
    The caller must free it.
 */
-double *MLSiteLikelihoodsByRate(/*IN*/NJ_t *NJ, /*IN*/float *rates, int nRateCategories);
+double *MLSiteLikelihoodsByRate(/*IN*/NJ_t *NJ, /*IN*/numeric_t *rates, int nRateCategories);
 
 typedef struct {
   double mult;			/* multiplier for the rates / divisor for the tree-length */
   double alpha;
   int nPos;
   int nRateCats;
-  float *rates;
+  numeric_t *rates;
   double *site_loglk;
 } siteratelk_t;
 
@@ -1295,7 +1326,7 @@ double GammaLogLk(/*IN*/siteratelk_t *s, /*OPTIONAL OUT*/double *gamma_loglk_sit
    and reports the rescaling value.
 */
 double RescaleGammaLogLk(int nPos, int nRateCats,
-			/*IN*/float *rates, /*IN*/double *site_loglk,
+			/*IN*/numeric_t *rates, /*IN*/double *site_loglk,
 			/*OPTIONAL*/FILE *fpLog);
 
 /* P(value<=x) for the gamma distribution with shape parameter alpha and scale 1/alpha */
@@ -1416,7 +1447,7 @@ double *PSameVector(double length, rates_t *rates);
 double *PDiffVector(double *pSame, rates_t *rates);
 
 /* expeigen[iRate*nCodes + j] = exp(length * rate iRate * eigenvalue j) */
-float *ExpEigenRates(double length, transition_matrix_t *transmat, rates_t *rates);
+numeric_t *ExpEigenRates(double length, transition_matrix_t *transmat, rates_t *rates);
 
 /* Print a progress report if more than 0.1 second has gone by since the progress report */
 /* Format should include 0-4 %d references and no newlines */
@@ -1440,21 +1471,21 @@ double brent(double ax, double bx, double cx, double (*f)(double, void *), void 
 /* Vector operations, either using SSE3 or not
    Code assumes that vectors are a multiple of 4 in size
 */
-void vector_multiply(/*IN*/float *f1, /*IN*/float *f2, int n, /*OUT*/float *fOut);
-float vector_multiply_sum(/*IN*/float *f1, /*IN*/float *f2, int n);
-void vector_add_mult(/*IN/OUT*/float *f, /*IN*/float *add, float weight, int n);
+void vector_multiply(/*IN*/numeric_t *f1, /*IN*/numeric_t *f2, int n, /*OUT*/numeric_t *fOut);
+numeric_t vector_multiply_sum(/*IN*/numeric_t *f1, /*IN*/numeric_t *f2, int n);
+void vector_add_mult(/*IN/OUT*/numeric_t *f, /*IN*/numeric_t *add, numeric_t weight, int n);
 
 /* multiply the transpose of a matrix by a vector */
-void matrixt_by_vector4(/*IN*/float mat[4][MAXCODES], /*IN*/float vec[4], /*OUT*/float out[4]);
+void matrixt_by_vector4(/*IN*/numeric_t mat[4][MAXCODES], /*IN*/numeric_t vec[4], /*OUT*/numeric_t out[4]);
 
 /* sum(f1*fBy)*sum(f2*fBy) */
-float vector_dot_product_rot(/*IN*/float *f1, /*IN*/float *f2, /*IN*/float* fBy, int n);
+numeric_t vector_dot_product_rot(/*IN*/numeric_t *f1, /*IN*/numeric_t *f2, /*IN*/numeric_t* fBy, int n);
 
 /* sum(f1*f2*f3) */
-float vector_multiply3_sum(/*IN*/float *f1, /*IN*/float *f2, /*IN*/float* f3, int n);
+numeric_t vector_multiply3_sum(/*IN*/numeric_t *f1, /*IN*/numeric_t *f2, /*IN*/numeric_t* f3, int n);
 
-float vector_sum(/*IN*/float *f1, int n);
-void vector_multiply_by(/*IN/OUT*/float *f, /*IN*/float fBy, int n);
+numeric_t vector_sum(/*IN*/numeric_t *f1, int n);
+void vector_multiply_by(/*IN/OUT*/numeric_t *f, /*IN*/numeric_t fBy, int n);
 
 double clockDiff(/*IN*/struct timeval *clock_start);
 int timeval_subtract (/*OUT*/struct timeval *result, /*IN*/struct timeval *x, /*IN*/struct timeval *y);
@@ -2223,7 +2254,7 @@ int main(int argc, char **argv) {
 	  double dLastLogLk = -1e20;
 	  for (iRound = 1; iRound <= maxRound; iRound++) {
 	    int node;
-	    float *oldlength = (float*)mymalloc(sizeof(float)*NJ->maxnodes);
+	    numeric_t *oldlength = (numeric_t*)mymalloc(sizeof(numeric_t)*NJ->maxnodes);
 	    for (node = 0; node < NJ->maxnode; node++)
 	      oldlength[node] = NJ->branchlength[node];
 	    OptimizeAllBranchLengths(/*IN/OUT*/NJ);
@@ -2234,7 +2265,7 @@ int main(int argc, char **argv) {
 	      if (dMaxChange < d)
 		dMaxChange = d;
 	    }
-	    oldlength = myfree(oldlength, sizeof(float)*NJ->maxnodes);
+	    oldlength = myfree(oldlength, sizeof(numeric_t)*NJ->maxnodes);
 	    double loglk = TreeLogLk(NJ, /*site_likelihoods*/NULL);
 	    bool bConverged = iRound > 1 && (dMaxChange < 0.001 || loglk < (dLastLogLk+treeLogLkDelta));
 	    if (verbose)
@@ -2330,10 +2361,10 @@ int main(int argc, char **argv) {
 
 	/* Compute gamma-based likelihood? */
 	if (gammaLogLk && nRateCats > 1) {
-	  float *rates = MLSiteRates(nRateCats);
+	  numeric_t *rates = MLSiteRates(nRateCats);
 	  double *site_loglk = MLSiteLikelihoodsByRate(NJ, rates, nRateCats);
 	  double scale = RescaleGammaLogLk(NJ->nPos, nRateCats, rates, /*IN*/site_loglk, /*OPTIONAL*/fpLog);
-	  rates = myfree(rates, sizeof(float) * nRateCats);
+	  rates = myfree(rates, sizeof(numeric_t) * nRateCats);
 	  site_loglk = myfree(site_loglk, sizeof(double) * nRateCats * NJ->nPos);
 
 	  for (i = 0; i < NJ->maxnodes; i++)
@@ -2552,20 +2583,20 @@ NJ_t *InitNJ(char **sequences, int nSeq, int nPos,
 
   NJ->totdiam = 0.0;
 
-  NJ->diameter = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
+  NJ->diameter = (numeric_t *)mymalloc(sizeof(numeric_t)*NJ->maxnodes);
   for (iNode = 0; iNode < NJ->maxnodes; iNode++) NJ->diameter[iNode] = 0;
 
-  NJ->varDiameter = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
+  NJ->varDiameter = (numeric_t *)mymalloc(sizeof(numeric_t)*NJ->maxnodes);
   for (iNode = 0; iNode < NJ->maxnodes; iNode++) NJ->varDiameter[iNode] = 0;
 
-  NJ->selfdist = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
+  NJ->selfdist = (numeric_t *)mymalloc(sizeof(numeric_t)*NJ->maxnodes);
   for (iNode = 0; iNode < NJ->maxnodes; iNode++) NJ->selfdist[iNode] = 0;
 
-  NJ->selfweight = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
+  NJ->selfweight = (numeric_t *)mymalloc(sizeof(numeric_t)*NJ->maxnodes);
   for (iNode = 0; iNode < NJ->nSeq; iNode++)
     NJ->selfweight[iNode] = NJ->nPos - NGaps(NJ,iNode);
 
-  NJ->outDistances = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
+  NJ->outDistances = (numeric_t *)mymalloc(sizeof(numeric_t)*NJ->maxnodes);
   NJ->nOutDistActive = (int *)mymalloc(sizeof(int)*NJ->maxnodes);
   for (iNode = 0; iNode < NJ->maxnodes; iNode++)
     NJ->nOutDistActive[iNode] = NJ->nSeq * 10; /* unreasonably high value */
@@ -2581,10 +2612,10 @@ NJ_t *InitNJ(char **sequences, int nSeq, int nPos,
   NJ->parent = (int *)mymalloc(sizeof(int)*NJ->maxnodes);
   for (iNode = 0; iNode < NJ->maxnodes; iNode++) NJ->parent[iNode] = -1;
 
-  NJ->branchlength = (float *)mymalloc(sizeof(float)*NJ->maxnodes); /* distance to parent */
+  NJ->branchlength = (numeric_t *)mymalloc(sizeof(numeric_t)*NJ->maxnodes); /* distance to parent */
   for (iNode = 0; iNode < NJ->maxnodes; iNode++) NJ->branchlength[iNode] = 0;
 
-  NJ->support = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
+  NJ->support = (numeric_t *)mymalloc(sizeof(numeric_t)*NJ->maxnodes);
   for (iNode = 0; iNode < NJ->maxnodes; iNode++) NJ->support[iNode] = -1.0;
 
   NJ->child = (children_t*)mymalloc(sizeof(children_t)*NJ->maxnodes);
@@ -2606,15 +2637,15 @@ NJ_t *FreeNJ(NJ_t *NJ) {
     NJ->profiles[i] = FreeProfile(NJ->profiles[i], NJ->nPos, NJ->nConstraints);
   NJ->profiles = myfree(NJ->profiles, sizeof(profile_t*) * NJ->maxnodes);
   NJ->outprofile = FreeProfile(NJ->outprofile, NJ->nPos, NJ->nConstraints);
-  NJ->diameter = myfree(NJ->diameter, sizeof(float)*NJ->maxnodes);
-  NJ->varDiameter = myfree(NJ->varDiameter, sizeof(float)*NJ->maxnodes);
-  NJ->selfdist = myfree(NJ->selfdist, sizeof(float)*NJ->maxnodes);
-  NJ->selfweight = myfree(NJ->selfweight, sizeof(float)*NJ->maxnodes);
-  NJ->outDistances = myfree(NJ->outDistances, sizeof(float)*NJ->maxnodes);
+  NJ->diameter = myfree(NJ->diameter, sizeof(numeric_t)*NJ->maxnodes);
+  NJ->varDiameter = myfree(NJ->varDiameter, sizeof(numeric_t)*NJ->maxnodes);
+  NJ->selfdist = myfree(NJ->selfdist, sizeof(numeric_t)*NJ->maxnodes);
+  NJ->selfweight = myfree(NJ->selfweight, sizeof(numeric_t)*NJ->maxnodes);
+  NJ->outDistances = myfree(NJ->outDistances, sizeof(numeric_t)*NJ->maxnodes);
   NJ->nOutDistActive = myfree(NJ->nOutDistActive, sizeof(int)*NJ->maxnodes);
   NJ->parent = myfree(NJ->parent, sizeof(int)*NJ->maxnodes);
-  NJ->branchlength = myfree(NJ->branchlength, sizeof(float)*NJ->maxnodes);
-  NJ->support = myfree(NJ->support, sizeof(float)*NJ->maxnodes);
+  NJ->branchlength = myfree(NJ->branchlength, sizeof(numeric_t)*NJ->maxnodes);
+  NJ->support = myfree(NJ->support, sizeof(numeric_t)*NJ->maxnodes);
   NJ->child = myfree(NJ->child, sizeof(children_t)*NJ->maxnodes);
   NJ->transmat = myfree(NJ->transmat, sizeof(transition_matrix_t));
   AllocRateCategories(&NJ->rates, 0, NJ->nPos);
@@ -2627,11 +2658,11 @@ NJ_t *FreeNJ(NJ_t *NJ) {
 */
 void AllocRateCategories(/*IN/OUT*/rates_t *rates, int nRateCategories, int nPos) {
   assert(nRateCategories >= 0);
-  rates->rates = myfree(rates->rates, sizeof(float)*rates->nRateCategories);
+  rates->rates = myfree(rates->rates, sizeof(numeric_t)*rates->nRateCategories);
   rates->ratecat = myfree(rates->ratecat, sizeof(unsigned int)*nPos);
   rates->nRateCategories = nRateCategories;
   if (rates->nRateCategories > 0) {
-    rates->rates = (float*)mymalloc(sizeof(float)*rates->nRateCategories);
+    rates->rates = (numeric_t*)mymalloc(sizeof(numeric_t)*rates->nRateCategories);
     int i;
     for (i = 0; i < nRateCategories; i++)
       rates->rates[i] = 1.0;
@@ -3051,8 +3082,8 @@ void FastNJSearch(NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *besthits, /*OUT*/b
 		  join->criterion,besthits[join->i].criterion);
       }
       
-      // Save the best hit either way, because the out-distance has probably changed
-      // since we started the computation.
+      /* Save the best hit either way, because the out-distance has probably changed
+	 since we started the computation. */
       join->j = besthits[join->i].j;
       join->weight = besthits[join->i].weight;
       join->dist = besthits[join->i].dist;
@@ -3465,7 +3496,7 @@ void PrintNJInternal(FILE *fp, NJ_t *NJ, bool useLen) {
       stack[stackSize-1].node = node;
       stack[stackSize-1].end = 1;
       children_t *c = &NJ->child[node];
-      // put children on in reverse order because we use the last one first
+      /* put children on in reverse order because we use the last one first */
       int i;
       for (i = c->nChild-1; i >=0; i--) {
 	stackSize++;
@@ -3545,7 +3576,7 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names, uniquify_t *unique, bool bShowSup
       stack[stackSize-1].node = node;
       stack[stackSize-1].end = 1;
       children_t *c = &NJ->child[node];
-      // put children on in reverse order because we use the last one first
+      /* put children on in reverse order because we use the last one first */
       int i;
       for (i = c->nChild-1; i >=0; i--) {
 	stackSize++;
@@ -4132,9 +4163,9 @@ double LogCorrect(double dist) {
 /* A helper function -- f1 and f2 can be NULL if the corresponding code != NOCODE
 */
 double ProfileDistPiece(unsigned int code1, unsigned int code2,
-			float *f1, float *f2, 
+			numeric_t *f1, numeric_t *f2, 
 			/*OPTIONAL*/distance_matrix_t *dmat,
-			/*OPTIONAL*/float *codeDist2) {
+			/*OPTIONAL*/numeric_t *codeDist2) {
   if (dmat) {
     if (code1 != NOCODE && code2 != NOCODE) { /* code1 vs code2 */
       return(dmat->distances[code1][code2]);
@@ -4194,8 +4225,8 @@ void ProfileDist(profile_t *profile1, profile_t *profile2, int nPos,
   int iFreq2 = 0;
   int i = 0;
   for (i = 0; i < nPos; i++) {
-      float *f1 = GET_FREQ(profile1,i,/*IN/OUT*/iFreq1);
-      float *f2 = GET_FREQ(profile2,i,/*IN/OUT*/iFreq2);
+      numeric_t *f1 = GET_FREQ(profile1,i,/*IN/OUT*/iFreq1);
+      numeric_t *f2 = GET_FREQ(profile2,i,/*IN/OUT*/iFreq2);
       if (profile1->weights[i] > 0 && profile2->weights[i] > 0) {
 	double weight = profile1->weights[i] * profile2->weights[i];
 	denom += weight;
@@ -4215,9 +4246,9 @@ void ProfileDist(profile_t *profile1, profile_t *profile2, int nPos,
    in that case code==NOCODE and in=NULL is possible, and then
    it will fail.
 */
-void AddToFreq(/*IN/OUT*/float *fOut,
+void AddToFreq(/*IN/OUT*/numeric_t *fOut,
 	       double weight,
-	       unsigned int codeIn, /*OPTIONAL*/float *fIn,
+	       unsigned int codeIn, /*OPTIONAL*/numeric_t *fIn,
 	       /*OPTIONAL*/distance_matrix_t *dmat) {
   assert(fOut != NULL);
   if (fIn != NULL) {
@@ -4278,7 +4309,7 @@ profile_t *AverageProfile(profile_t *profile1, profile_t *profile2,
   }
 
   /* Allocate and set the vectors */
-  out->vectors = (float*)mymalloc(sizeof(float)*nCodes*out->nVectors);
+  out->vectors = (numeric_t*)mymalloc(sizeof(numeric_t)*nCodes*out->nVectors);
   for (i = 0; i < nCodes * out->nVectors; i++) out->vectors[i] = 0;
   nProfileFreqAlloc += out->nVectors;
   nProfileFreqAvoid += nPos - out->nVectors;
@@ -4286,9 +4317,9 @@ profile_t *AverageProfile(profile_t *profile1, profile_t *profile2,
   int iFreq1 = 0;
   int iFreq2 = 0;
   for (i=0; i < nPos; i++) {
-    float *f = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
-    float *f1 = GET_FREQ(profile1,i,/*IN/OUT*/iFreq1);
-    float *f2 = GET_FREQ(profile2,i,/*IN/OUT*/iFreq2);
+    numeric_t *f = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
+    numeric_t *f1 = GET_FREQ(profile1,i,/*IN/OUT*/iFreq1);
+    numeric_t *f2 = GET_FREQ(profile2,i,/*IN/OUT*/iFreq2);
     if (f != NULL) {
       if (profile1->weights[i] > 0)
 	AddToFreq(/*IN/OUT*/f, profile1->weights[i] * bionjWeight,
@@ -4327,7 +4358,7 @@ profile_t *AverageProfile(profile_t *profile1, profile_t *profile2,
    Simply dividing by total_weight is not ideal because of roundoff error
    So compute total_freq instead
 */
-void NormalizeFreq(/*IN/OUT*/float *freq, distance_matrix_t *dmat) {
+void NormalizeFreq(/*IN/OUT*/numeric_t *freq, distance_matrix_t *dmat) {
   double total_freq = 0;
   int k;
   if (dmat != NULL) {
@@ -4340,7 +4371,7 @@ void NormalizeFreq(/*IN/OUT*/float *freq, distance_matrix_t *dmat) {
       total_freq += freq[k];
   }
   if (total_freq > 1e-10) {
-    float inverse_weight = 1.0/total_freq;
+    numeric_t inverse_weight = 1.0/total_freq;
     vector_multiply_by(/*IN/OUT*/freq, inverse_weight, nCodes);
   } else {
     /* This can happen if we are in a very low-weight region, e.g. if a mostly-gap position gets weighted down
@@ -4376,7 +4407,7 @@ profile_t *OutProfile(profile_t **profiles, int nProfiles,
   }
 
   /* Initialize the frequencies to 0 */
-  out->vectors = (float*)mymalloc(sizeof(float)*nCodes*out->nVectors);
+  out->vectors = (numeric_t*)mymalloc(sizeof(numeric_t)*nCodes*out->nVectors);
   for (i = 0; i < nCodes*out->nVectors; i++)
     out->vectors[i] = 0;
 
@@ -4385,8 +4416,8 @@ profile_t *OutProfile(profile_t **profiles, int nProfiles,
     int iFreqOut = 0;
     int iFreqIn = 0;
     for (i = 0; i < nPos; i++) {
-      float *fIn = GET_FREQ(profiles[in],i,/*IN/OUT*/iFreqIn);
-      float *fOut = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
+      numeric_t *fIn = GET_FREQ(profiles[in],i,/*IN/OUT*/iFreqIn);
+      numeric_t *fOut = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
       if (profiles[in]->weights[i] > 0)
 	AddToFreq(/*IN/OUT*/fOut, profiles[in]->weights[i],
 		  profiles[in]->codes[i], fIn, dmat);
@@ -4398,7 +4429,7 @@ profile_t *OutProfile(profile_t **profiles, int nProfiles,
   /* And normalize the frequencies to sum to 1 */
   int iFreqOut = 0;
   for (i = 0; i < nPos; i++) {
-    float *fOut = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
+    numeric_t *fOut = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
     if (fOut)
       NormalizeFreq(/*IN/OUT*/fOut, dmat);
   }
@@ -4431,10 +4462,10 @@ void UpdateOutProfile(/*IN/OUT*/profile_t *out, profile_t *old1, profile_t *old2
   assert(nActiveOld > 0);
 
   for (i = 0; i < nPos; i++) {
-    float *fOut = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
-    float *fOld1 = GET_FREQ(old1,i,/*IN/OUT*/iFreq1);
-    float *fOld2 = GET_FREQ(old2,i,/*IN/OUT*/iFreq2);
-    float *fNew = GET_FREQ(new,i,/*IN/OUT*/iFreqNew);
+    numeric_t *fOut = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
+    numeric_t *fOld1 = GET_FREQ(old1,i,/*IN/OUT*/iFreq1);
+    numeric_t *fOld2 = GET_FREQ(old2,i,/*IN/OUT*/iFreq2);
+    numeric_t *fNew = GET_FREQ(new,i,/*IN/OUT*/iFreqNew);
 
     assert(out->codes[i] == NOCODE && fOut != NULL); /* No no-vector optimization for outprofiles */
     if (verbose > 3 && i < 3) {
@@ -4484,11 +4515,11 @@ void UpdateOutProfile(/*IN/OUT*/profile_t *out, profile_t *old1, profile_t *old2
 void SetCodeDist(/*IN/OUT*/profile_t *profile, int nPos,
 			   distance_matrix_t *dmat) {
   if (profile->codeDist == NULL)
-    profile->codeDist = (float*)mymalloc(sizeof(float)*nPos*nCodes);
+    profile->codeDist = (numeric_t*)mymalloc(sizeof(numeric_t)*nPos*nCodes);
   int i;
   int iFreq = 0;
   for (i = 0; i < nPos; i++) {
-    float *f = GET_FREQ(profile,i,/*IN/OUT*/iFreq);
+    numeric_t *f = GET_FREQ(profile,i,/*IN/OUT*/iFreq);
 
     int k;
     for (k = 0; k < nCodes; k++)
@@ -4539,7 +4570,7 @@ void SetBestHit(int node, NJ_t *NJ, int nActive,
   }
 }
 
-void ReadMatrix(char *filename, /*OUT*/float codes[MAXCODES][MAXCODES], bool checkCodes) {
+void ReadMatrix(char *filename, /*OUT*/numeric_t codes[MAXCODES][MAXCODES], bool checkCodes) {
   char buf[BUFFER_SIZE] = "";
   FILE *fp = fopen(filename, "r");
   if (fp == NULL) {
@@ -4586,7 +4617,7 @@ void ReadMatrix(char *filename, /*OUT*/float codes[MAXCODES][MAXCODES], bool che
     field = strtok(NULL, "\t");	/* ignore first column */
     int iColumn;
     for (iColumn = 0; iColumn < nCodes && field != NULL; iColumn++, field = strtok(NULL,"\t")) {
-      if(sscanf(field,"%f",&codes[iLine][iColumn]) != 1) {
+      if(sscanf(field,ScanNumericSpec,&codes[iLine][iColumn]) != 1) {
 	fprintf(stderr,"Cannot parse field %s in file %s\n", field, filename);
 	exit(1);
       }
@@ -4594,7 +4625,7 @@ void ReadMatrix(char *filename, /*OUT*/float codes[MAXCODES][MAXCODES], bool che
   }
 }
 
-void ReadVector(char *filename, /*OUT*/float codes[MAXCODES]) {
+void ReadVector(char *filename, /*OUT*/numeric_t codes[MAXCODES]) {
   FILE *fp = fopen(filename,"r");
   if (fp == NULL) {
     fprintf(stderr, "Cannot read %s\n",filename);
@@ -4602,7 +4633,7 @@ void ReadVector(char *filename, /*OUT*/float codes[MAXCODES]) {
   }
   int i;
   for (i = 0; i < nCodes; i++) {
-    if (fscanf(fp,"%f",&codes[i]) != 1) {
+    if (fscanf(fp,ScanNumericSpec,&codes[i]) != 1) {
       fprintf(stderr,"Cannot read %d entry of %s\n",i+1,filename);
       exit(1);
     }
@@ -4751,12 +4782,12 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
     out->weights[i] = 1.0;
   }
   out->nVectors = nPos;
-  out->vectors = (float*)mymalloc(sizeof(float)*nCodes*out->nVectors);
+  out->vectors = (numeric_t*)mymalloc(sizeof(numeric_t)*nCodes*out->nVectors);
   for (i = 0; i < nCodes * out->nVectors; i++) out->vectors[i] = 0;
   int iFreqOut = 0;
   int iFreq1 = 0;
   int iFreq2 = 0;
-  float *expeigenRates1 = NULL, *expeigenRates2 = NULL;
+  numeric_t *expeigenRates1 = NULL, *expeigenRates2 = NULL;
 
   if (transmat != NULL) {
     expeigenRates1 = ExpEigenRates(len1, transmat, rates);
@@ -4766,7 +4797,7 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
   if (transmat == NULL) {	/* Jukes-Cantor */
     assert(nCodes == 4);
 
-    float fAll[128][4];
+    numeric_t fAll[128][4];
     for (j = 0; j < 4; j++)
       for (k = 0; k < 4; k++)
 	fAll[j][k] = (j==k) ? 1.0 : 0.0;
@@ -4778,7 +4809,7 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
     double *PSame2 = PSameVector(len2, rates);
     double *PDiff2 = PDiffVector(PSame2, rates);
 
-    float mix1[4], mix2[4];
+    numeric_t mix1[4], mix2[4];
 
     for (i=0; i < nPos; i++) {
       int iRate = rates->ratecat[i];
@@ -4786,8 +4817,8 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
       double w2 = p2->weights[i];
       int code1 = p1->codes[i];
       int code2 = p2->codes[i];
-      float *f1 = GET_FREQ(p1,i,/*IN/OUT*/iFreq1);
-      float *f2 = GET_FREQ(p2,i,/*IN/OUT*/iFreq2);
+      numeric_t *f1 = GET_FREQ(p1,i,/*IN/OUT*/iFreq1);
+      numeric_t *f2 = GET_FREQ(p2,i,/*IN/OUT*/iFreq2);
 
       /* First try to store a simple profile */
       if (f1 == NULL && f2 == NULL) {
@@ -4849,7 +4880,7 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
       }
       out->codes[i] = NOCODE;
       out->weights[i] = 1.0;
-      float *f = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
+      numeric_t *f = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
       double lkAB = 0;
       for (j = 0; j < 4; j++) {
 	f[j] = (f1[j] * PSame1[iRate] + (1.0-f1[j]) * PDiff1[iRate])
@@ -4865,8 +4896,8 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
     PDiff1 = myfree(PDiff1, sizeof(double) * rates->nRateCategories);
     PDiff2 = myfree(PDiff2, sizeof(double) * rates->nRateCategories);
   } else if (nCodes == 4) {	/* matrix model on nucleotides */
-    float *fGap = &transmat->codeFreq[NOCODE][0];
-    float f1mix[4], f2mix[4];
+    numeric_t *fGap = &transmat->codeFreq[NOCODE][0];
+    numeric_t f1mix[4], f2mix[4];
     
     for (i=0; i < nPos; i++) {
       if (p1->codes[i] == NOCODE && p2->codes[i] == NOCODE
@@ -4877,11 +4908,11 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
 	continue;
       }
       int iRate = rates->ratecat[i];
-      float *expeigen1 = &expeigenRates1[iRate*4];
-      float *expeigen2 = &expeigenRates2[iRate*4];
-      float *f1 = GET_FREQ(p1,i,/*IN/OUT*/iFreq1);
-      float *f2 = GET_FREQ(p2,i,/*IN/OUT*/iFreq2);
-      float *fOut = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
+      numeric_t *expeigen1 = &expeigenRates1[iRate*4];
+      numeric_t *expeigen2 = &expeigenRates2[iRate*4];
+      numeric_t *f1 = GET_FREQ(p1,i,/*IN/OUT*/iFreq1);
+      numeric_t *f2 = GET_FREQ(p2,i,/*IN/OUT*/iFreq2);
+      numeric_t *fOut = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
       assert(fOut != NULL);
 
       if (f1 == NULL) {
@@ -4902,8 +4933,8 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
 	  f2 = f2mix;
 	}
       }
-      float fMult1[4] ALIGNED;	/* rotated1 * expeigen1 */
-      float fMult2[4] ALIGNED;	/* rotated2 * expeigen2 */
+      numeric_t fMult1[4] ALIGNED;	/* rotated1 * expeigen1 */
+      numeric_t fMult2[4] ALIGNED;	/* rotated2 * expeigen2 */
 #if 0 /* SSE3 is slower */
       vector_multiply(f1, expeigen1, 4, /*OUT*/fMult1);
       vector_multiply(f2, expeigen2, 4, /*OUT*/fMult2);
@@ -4913,7 +4944,7 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
 	fMult2[j] = f2[j]*expeigen2[j];
       }
 #endif
-      float fPost[4] ALIGNED;		/* in  unrotated space */
+      numeric_t fPost[4] ALIGNED;		/* in  unrotated space */
       for (j = 0; j < 4; j++) {
 #if 0 /* SSE3 is slower */
 	fPost[j] = vector_dot_product_rot(fMult1, fMult2, &transmat->codeFreq[j][0], 4)
@@ -4944,9 +4975,9 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
       matrixt_by_vector4(transmat->eigeninvT, fPost, /*OUT*/fOut);
     }  /* end loop over position i */
   } else if (nCodes == 20) {	/* matrix model on amino acids */
-    float *fGap = &transmat->codeFreq[NOCODE][0];
-    float f1mix[20] ALIGNED;
-    float f2mix[20] ALIGNED;
+    numeric_t *fGap = &transmat->codeFreq[NOCODE][0];
+    numeric_t f1mix[20] ALIGNED;
+    numeric_t f2mix[20] ALIGNED;
     
     for (i=0; i < nPos; i++) {
       if (p1->codes[i] == NOCODE && p2->codes[i] == NOCODE
@@ -4957,11 +4988,11 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
 	continue;
       }
       int iRate = rates->ratecat[i];
-      float *expeigen1 = &expeigenRates1[iRate*20];
-      float *expeigen2 = &expeigenRates2[iRate*20];
-      float *f1 = GET_FREQ(p1,i,/*IN/OUT*/iFreq1);
-      float *f2 = GET_FREQ(p2,i,/*IN/OUT*/iFreq2);
-      float *fOut = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
+      numeric_t *expeigen1 = &expeigenRates1[iRate*20];
+      numeric_t *expeigen2 = &expeigenRates2[iRate*20];
+      numeric_t *f1 = GET_FREQ(p1,i,/*IN/OUT*/iFreq1);
+      numeric_t *f2 = GET_FREQ(p2,i,/*IN/OUT*/iFreq2);
+      numeric_t *fOut = GET_FREQ(out,i,/*IN/OUT*/iFreqOut);
       assert(fOut != NULL);
 
       if (f1 == NULL) {
@@ -4982,14 +5013,16 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
 	  f2 = f2mix;
 	}
       }
-      float fMult1[20] ALIGNED;	/* rotated1 * expeigen1 */
-      float fMult2[20] ALIGNED;	/* rotated2 * expeigen2 */
+      numeric_t fMult1[20] ALIGNED;	/* rotated1 * expeigen1 */
+      numeric_t fMult2[20] ALIGNED;	/* rotated2 * expeigen2 */
       vector_multiply(f1, expeigen1, 20, /*OUT*/fMult1);
       vector_multiply(f2, expeigen2, 20, /*OUT*/fMult2);
-      float fPost[20] ALIGNED;		/* in  unrotated space */
+      numeric_t fPost[20] ALIGNED;		/* in  unrotated space */
       for (j = 0; j < 20; j++) {
-	fPost[j] = vector_dot_product_rot(fMult1, fMult2, &transmat->codeFreq[j][0], 20)
+	numeric_t value = vector_dot_product_rot(fMult1, fMult2, &transmat->codeFreq[j][0], 20)
 	  * transmat->statinv[j];
+	/* Added this logic try to avoid rare numerical problems */
+	fPost[j] = value >= 0 ? value : 0;
       }
       double fPostTot = vector_sum(fPost, 20);
       assert(fPostTot > 1e-10);
@@ -5038,18 +5071,18 @@ profile_t *PosteriorProfile(profile_t *p1, profile_t *p2,
   }
 
   if (transmat != NULL) {
-    expeigenRates1 = myfree(expeigenRates1, sizeof(float) * rates->nRateCategories * nCodes);
-    expeigenRates2 = myfree(expeigenRates2, sizeof(float) * rates->nRateCategories * nCodes);
+    expeigenRates1 = myfree(expeigenRates1, sizeof(numeric_t) * rates->nRateCategories * nCodes);
+    expeigenRates2 = myfree(expeigenRates2, sizeof(numeric_t) * rates->nRateCategories * nCodes);
   }
 
   /* Reallocate out->vectors to be the right size */
   out->nVectors = iFreqOut;
   if (out->nVectors == 0)
-    out->vectors = (float*)myfree(out->vectors, sizeof(float)*nCodes*nPos);
+    out->vectors = (numeric_t*)myfree(out->vectors, sizeof(numeric_t)*nCodes*nPos);
   else
-    out->vectors = (float*)myrealloc(out->vectors,
-				     /*OLDSIZE*/sizeof(float)*nCodes*nPos,
-				     /*NEWSIZE*/sizeof(float)*nCodes*out->nVectors,
+    out->vectors = (numeric_t*)myrealloc(out->vectors,
+				     /*OLDSIZE*/sizeof(numeric_t)*nCodes*nPos,
+				     /*NEWSIZE*/sizeof(numeric_t)*nCodes*out->nVectors,
 				     /*copy*/true); /* try to save space */
   nProfileFreqAlloc += out->nVectors;
   nProfileFreqAvoid += nPos - out->nVectors;
@@ -5079,8 +5112,8 @@ double *PDiffVector(double *pSame, rates_t *rates) {
   return(pDiff);
 }
 
-float *ExpEigenRates(double length, transition_matrix_t *transmat, rates_t *rates) {
-  float *expeigen = mymalloc(sizeof(float) * nCodes * rates->nRateCategories);
+numeric_t *ExpEigenRates(double length, transition_matrix_t *transmat, rates_t *rates) {
+  numeric_t *expeigen = mymalloc(sizeof(numeric_t) * nCodes * rates->nRateCategories);
   int iRate, j;
   for (iRate = 0; iRate < rates->nRateCategories; iRate++) {
     for (j = 0; j < nCodes; j++) {
@@ -5102,7 +5135,7 @@ double PairLogLk(profile_t *pA, profile_t *pB, double length, int nPos,
   double loglk = 0.0;		/* stores underflow of lk during the loop over positions */
   int i,j,k;
   assert(rates != NULL && rates->nRateCategories > 0);
-  float *expeigenRates = NULL;
+  numeric_t *expeigenRates = NULL;
   if (transmat != NULL)
     expeigenRates = ExpEigenRates(length, transmat, rates);
 
@@ -5110,7 +5143,7 @@ double PairLogLk(profile_t *pA, profile_t *pB, double length, int nPos,
     assert (nCodes == 4);
     double *pSame = PSameVector(length, rates);
     double *pDiff = PDiffVector(pSame, rates);
-    float fAll[128][4];
+    numeric_t fAll[128][4];
     for (j = 0; j < 4; j++)
       for (k = 0; k < 4; k++)
 	fAll[j][k] = (j==k) ? 1.0 : 0.0;
@@ -5125,8 +5158,8 @@ double PairLogLk(profile_t *pA, profile_t *pB, double length, int nPos,
       double wB = pB->weights[i];
       int codeA = pA->codes[i];
       int codeB = pB->codes[i];
-      float *fA = GET_FREQ(pA,i,/*IN/OUT*/iFreqA);
-      float *fB = GET_FREQ(pB,i,/*IN/OUT*/iFreqB);
+      numeric_t *fA = GET_FREQ(pA,i,/*IN/OUT*/iFreqA);
+      numeric_t *fB = GET_FREQ(pB,i,/*IN/OUT*/iFreqB);
       double lkAB = 0;
 
       if (fA == NULL && fB == NULL) {
@@ -5176,12 +5209,12 @@ double PairLogLk(profile_t *pA, profile_t *pB, double length, int nPos,
   } else if (nCodes == 4) {	/* matrix model on nucleotides */
     int iFreqA = 0;
     int iFreqB = 0;
-    float fAmix[4], fBmix[4];
-    float *fGap = &transmat->codeFreq[NOCODE][0];
+    numeric_t fAmix[4], fBmix[4];
+    numeric_t *fGap = &transmat->codeFreq[NOCODE][0];
 
     for (i = 0; i < nPos; i++) {
       int iRate = rates->ratecat[i];
-      float *expeigen = &expeigenRates[iRate*4];
+      numeric_t *expeigen = &expeigenRates[iRate*4];
       double wA = pA->weights[i];
       double wB = pB->weights[i];
       if (wA == 0 && wB == 0 && pA->codes[i] == NOCODE && pB->codes[i] == NOCODE) {
@@ -5189,8 +5222,8 @@ double PairLogLk(profile_t *pA, profile_t *pB, double length, int nPos,
 	   Do not need to advance iFreqA or iFreqB */
 	continue;		
       }
-      float *fA = GET_FREQ(pA,i,/*IN/OUT*/iFreqA);
-      float *fB = GET_FREQ(pB,i,/*IN/OUT*/iFreqB);
+      numeric_t *fA = GET_FREQ(pA,i,/*IN/OUT*/iFreqA);
+      numeric_t *fB = GET_FREQ(pB,i,/*IN/OUT*/iFreqB);
       if (fA == NULL)
 	fA = &transmat->codeFreq[pA->codes[i]][0];
       if (wA > 0.0 && wA < 1.0) {
@@ -5206,7 +5239,7 @@ double PairLogLk(profile_t *pA, profile_t *pB, double length, int nPos,
 	fB = fBmix;
       }
       /* SSE3 instructions do not speed this step up:
-	 float lkAB = vector_multiply3_sum(expeigen, fA, fB); */
+	 numeric_t lkAB = vector_multiply3_sum(expeigen, fA, fB); */
       double lkAB = 0;
       for (j = 0; j < 4; j++)
 	lkAB += expeigen[j]*fA[j]*fB[j];
@@ -5226,12 +5259,12 @@ double PairLogLk(profile_t *pA, profile_t *pB, double length, int nPos,
   } else if (nCodes == 20) {	/* matrix model on amino acids */
     int iFreqA = 0;
     int iFreqB = 0;
-    float fAmix[20], fBmix[20];
-    float *fGap = &transmat->codeFreq[NOCODE][0];
+    numeric_t fAmix[20], fBmix[20];
+    numeric_t *fGap = &transmat->codeFreq[NOCODE][0];
 
     for (i = 0; i < nPos; i++) {
       int iRate = rates->ratecat[i];
-      float *expeigen = &expeigenRates[iRate*20];
+      numeric_t *expeigen = &expeigenRates[iRate*20];
       double wA = pA->weights[i];
       double wB = pB->weights[i];
       if (wA == 0 && wB == 0 && pA->codes[i] == NOCODE && pB->codes[i] == NOCODE) {
@@ -5239,8 +5272,8 @@ double PairLogLk(profile_t *pA, profile_t *pB, double length, int nPos,
 	   Do not need to advance iFreqA or iFreqB */
 	continue;		
       }
-      float *fA = GET_FREQ(pA,i,/*IN/OUT*/iFreqA);
-      float *fB = GET_FREQ(pB,i,/*IN/OUT*/iFreqB);
+      numeric_t *fA = GET_FREQ(pA,i,/*IN/OUT*/iFreqA);
+      numeric_t *fB = GET_FREQ(pB,i,/*IN/OUT*/iFreqB);
       if (fA == NULL)
 	fA = &transmat->codeFreq[pA->codes[i]][0];
       if (wA > 0.0 && wA < 1.0) {
@@ -5255,7 +5288,57 @@ double PairLogLk(profile_t *pA, profile_t *pB, double length, int nPos,
 	  fBmix[j] = wB*fB[j] + (1.0-wB)*fGap[j];
 	fB = fBmix;
       }
-      float lkAB = vector_multiply3_sum(expeigen, fA, fB, 20);
+      numeric_t lkAB = vector_multiply3_sum(expeigen, fA, fB, 20);
+      if (!(lkAB > 0)) {
+	/* If this happens, it indicates a numerical problem that needs to be addressed elsewhere,
+	   so report all the details */
+	fprintf(stderr, "# FastTree.c::PairLogLk -- numerical problem!\n");
+	fprintf(stderr, "# This block is intended for loading into R\n");
+
+	fprintf(stderr, "lkAB = %.8g\n", lkAB);
+	fprintf(stderr, "Branch_length= %.8g\nalignment_position=%d\nnCodes=%d\nrate_category=%d\nrate=%.8g\n",
+		length, i, nCodes, iRate, rates->rates[iRate]);
+	fprintf(stderr, "wA=%.8g\nwB=%.8g\n", wA, wB);
+	fprintf(stderr, "codeA = %d\ncodeB = %d\n", pA->codes[i], pB->codes[i]);
+
+	fprintf(stderr, "fA = c(");
+	for (j = 0; j < nCodes; j++) fprintf(stderr, "%s %.8g", j==0?"":",", fA[j]);
+	fprintf(stderr,")\n");
+
+	fprintf(stderr, "fB = c(");
+	for (j = 0; j < nCodes; j++) fprintf(stderr, "%s %.8g", j==0?"":",", fB[j]);
+	fprintf(stderr,")\n");
+
+	fprintf(stderr, "stat = c(");
+	for (j = 0; j < nCodes; j++) fprintf(stderr, "%s %.8g", j==0?"":",", transmat->stat[j]);
+	fprintf(stderr,")\n");
+
+	fprintf(stderr, "eigenval = c(");
+	for (j = 0; j < nCodes; j++) fprintf(stderr, "%s %.8g", j==0?"":",", transmat->eigenval[j]);
+	fprintf(stderr,")\n");
+
+	fprintf(stderr, "expeigen = c(");
+	for (j = 0; j < nCodes; j++) fprintf(stderr, "%s %.8g", j==0?"":",", expeigen[j]);
+	fprintf(stderr,")\n");
+
+	int k;
+	fprintf(stderr, "codeFreq = c(");
+	for (j = 0; j < nCodes; j++) for(k = 0; k < nCodes; k++) fprintf(stderr, "%s %.8g", j==0 && k==0?"":",",
+									     transmat->codeFreq[j][k]);
+	fprintf(stderr,")\n");
+
+	fprintf(stderr, "eigeninv = c(");
+	for (j = 0; j < nCodes; j++) for(k = 0; k < nCodes; k++) fprintf(stderr, "%s %.8g", j==0 && k==0?"":",",
+									     transmat->eigeninv[j][k]);
+	fprintf(stderr,")\n");
+
+	fprintf(stderr, "# Transform into matrices and compute un-rotated vectors for profiles A and B\n");
+	fprintf(stderr, "codeFreq = matrix(codeFreq,nrow=20);\n");
+	fprintf(stderr, "eigeninv = matrix(eigeninv,nrow=20);\n");
+	fputs("unrotA = stat * (eigeninv %*% fA)\n", stderr);
+	fputs("unrotB = stat * (eigeninv %*% fB)\n", stderr);
+	fprintf(stderr,"# End of R block\n");
+      }
       assert(lkAB > 0);
       if (site_likelihoods != NULL)
 	site_likelihoods[i] *= lkAB;
@@ -5273,7 +5356,7 @@ double PairLogLk(profile_t *pA, profile_t *pB, double length, int nPos,
     assert(0);			/* illegal nCodes */
   }
   if (transmat != NULL)
-    expeigenRates = myfree(expeigenRates, sizeof(float) * rates->nRateCategories * 20);
+    expeigenRates = myfree(expeigenRates, sizeof(numeric_t) * rates->nRateCategories * 20);
   loglk += log(lk);
   nLkCompute++;
   return(loglk);
@@ -5358,7 +5441,7 @@ double MLQuartetOptimize(profile_t *pA, profile_t *pB, profile_t *pC, profile_t 
 				      PairNegLogLk,
 				      /*data*/&qopt,
 				      /*ftol*/MLFTolBranchLength,
-				      /*atol*/MLMinBranchLength,
+				      /*atol*/MLMinBranchLengthTolerance,
 				      /*OUT*/&negloglk,
 				      /*OUT*/&f2x);
 
@@ -5390,7 +5473,7 @@ double MLQuartetOptimize(profile_t *pA, profile_t *pB, profile_t *pC, profile_t 
 				      PairNegLogLk,
 				      /*data*/&qopt,
 				      /*ftol*/MLFTolBranchLength,
-				      /*atol*/MLMinBranchLength,
+				      /*atol*/MLMinBranchLengthTolerance,
 				      /*OUT*/&negloglk,
 				      /*OUT*/&f2x);
   pBCD = FreeProfile(pBCD, nPos, /*nConstraints*/0);
@@ -5405,7 +5488,7 @@ double MLQuartetOptimize(profile_t *pA, profile_t *pB, profile_t *pC, profile_t 
 				      PairNegLogLk,
 				      /*data*/&qopt,
 				      /*ftol*/MLFTolBranchLength,
-				      /*atol*/MLMinBranchLength,
+				      /*atol*/MLMinBranchLengthTolerance,
 				      /*OUT*/&negloglk,
 				      /*OUT*/&f2x);
   pACD = FreeProfile(pACD, nPos, /*nConstraints*/0);
@@ -5424,7 +5507,7 @@ double MLQuartetOptimize(profile_t *pA, profile_t *pB, profile_t *pC, profile_t 
 				      PairNegLogLk,
 				      /*data*/&qopt,
 				      /*ftol*/MLFTolBranchLength,
-				      /*atol*/MLMinBranchLength,
+				      /*atol*/MLMinBranchLengthTolerance,
 				      /*OUT*/&negloglk,
 				      /*OUT*/&f2x);
   pABD = FreeProfile(pABD, nPos, /*nConstraints*/0);
@@ -5439,7 +5522,7 @@ double MLQuartetOptimize(profile_t *pA, profile_t *pB, profile_t *pC, profile_t 
 				      PairNegLogLk,
 				      /*data*/&qopt,
 				      /*ftol*/MLFTolBranchLength,
-				      /*atol*/MLMinBranchLength,
+				      /*atol*/MLMinBranchLengthTolerance,
 				      /*OUT*/&negloglk,
 				      /*OUT*/&f2x);
 
@@ -5481,7 +5564,7 @@ nni_t MLQuartetNNI(profile_t *profiles[4],
 		   rates_t *rates,
 		   int nPos, int nConstraints,
 		   /*OUT*/double criteria[3], /* The three potential quartet log-likelihoods */
-		   /*IN/OUT*/float len[5],
+		   /*IN/OUT*/numeric_t len[5],
 		   bool bFast)
 {
   int i;
@@ -5805,27 +5888,27 @@ double GTRNegLogLk(double x, void *data) {
 }
 
 /* Caller must free the resulting vector of n rates */
-float *MLSiteRates(int nRateCategories) {
+numeric_t *MLSiteRates(int nRateCategories) {
   /* Even spacing from 1/nRate to nRate */
   double logNCat = log((double)nRateCategories);
   double logMinRate = -logNCat;
   double logMaxRate = logNCat;
   double logd = (logMaxRate-logMinRate)/(double)(nRateCategories-1);
 
-  float *rates = mymalloc(sizeof(float)*nRateCategories);
+  numeric_t *rates = mymalloc(sizeof(numeric_t)*nRateCategories);
   int i;
   for (i = 0; i < nRateCategories; i++)
     rates[i] = exp(logMinRate + logd*(double)i);
   return(rates);
 }
 
-double *MLSiteLikelihoodsByRate(/*IN*/NJ_t *NJ, /*IN*/float *rates, int nRateCategories) {
+double *MLSiteLikelihoodsByRate(/*IN*/NJ_t *NJ, /*IN*/numeric_t *rates, int nRateCategories) {
   double *site_loglk = mymalloc(sizeof(double)*NJ->nPos*nRateCategories);
 
   /* save the original rates */
   assert(NJ->rates.nRateCategories > 0);
-  float *oldRates = NJ->rates.rates;
-  NJ->rates.rates = mymalloc(sizeof(float) * NJ->rates.nRateCategories);
+  numeric_t *oldRates = NJ->rates.rates;
+  NJ->rates.rates = mymalloc(sizeof(numeric_t) * NJ->rates.nRateCategories);
 
   /* Compute site likelihood for each rate */
   int iPos;
@@ -5846,7 +5929,7 @@ double *MLSiteLikelihoodsByRate(/*IN*/NJ_t *NJ, /*IN*/float *rates, int nRateCat
   }
 
   /* restore original rates and profiles */
-  myfree(NJ->rates.rates, sizeof(float) * NJ->rates.nRateCategories);
+  myfree(NJ->rates.rates, sizeof(numeric_t) * NJ->rates.nRateCategories);
   NJ->rates.rates = oldRates;
   RecomputeMLProfiles(/*IN/OUT*/NJ);
 
@@ -5860,7 +5943,7 @@ void SetMLRates(/*IN/OUT*/NJ_t *NJ, int nRateCategories) {
     RecomputeMLProfiles(/*IN/OUT*/NJ);
     return;
   }
-  float *rates = MLSiteRates(nRateCategories);
+  numeric_t *rates = MLSiteRates(nRateCategories);
   double *site_loglk = MLSiteLikelihoodsByRate(/*IN*/NJ, /*IN*/rates, nRateCategories);
 
   /* Select best rate for each site, correcting for the prior
@@ -5896,7 +5979,7 @@ void SetMLRates(/*IN/OUT*/NJ_t *NJ, int nRateCategories) {
     rates[iRate] /= avgRate;
   
   /* Save the rates */
-  NJ->rates.rates = myfree(NJ->rates.rates, sizeof(float) * NJ->rates.nRateCategories);
+  NJ->rates.rates = myfree(NJ->rates.rates, sizeof(numeric_t) * NJ->rates.nRateCategories);
   NJ->rates.rates = rates;
   NJ->rates.nRateCategories = nRateCategories;
 
@@ -5961,7 +6044,7 @@ double OptMult(double mult, void *data) {
 }
 
 /* Input site_loglk must be for each rate */
-double RescaleGammaLogLk(int nPos, int nRateCats, /*IN*/float *rates, /*IN*/double *site_loglk,
+double RescaleGammaLogLk(int nPos, int nRateCats, /*IN*/numeric_t *rates, /*IN*/double *site_loglk,
 			 /*OPTIONAL*/FILE *fpLog) {
   siteratelk_t s = { /*mult*/1.0, /*alpha*/1.0, nPos, nRateCats, rates, site_loglk };
   double fx, f2x;
@@ -6025,7 +6108,7 @@ double MLPairOptimize(profile_t *pA, profile_t *pB,
 			       PairNegLogLk,
 			       /*data*/&qopt,
 			       /*ftol*/MLFTolBranchLength,
-			       /*atol*/MLMinBranchLength,
+			       /*atol*/MLMinBranchLengthTolerance,
 			       /*OUT*/&negloglk,
 			       /*OUT*/&f2x);
   return(-negloglk);		/* the log likelihood */
@@ -6262,7 +6345,7 @@ int NNI(/*IN/OUT*/NJ_t *NJ, int iRound, int nRounds, bool useML,
 	      len[0], len[1], len[2], len[3], len[4]);
     }
 
-    float newlength[5];
+    numeric_t newlength[5];
     double criteria[3];
     if (useML) {
       for (i = 0; i < 4; i++)
@@ -6880,7 +6963,7 @@ void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ, int nBootstrap) {
 
 profile_t *NewProfile(int nPos, int nConstraints) {
   profile_t *profile = (profile_t *)mymalloc(sizeof(profile_t));
-  profile->weights = mymalloc(sizeof(float)*nPos);
+  profile->weights = mymalloc(sizeof(numeric_t)*nPos);
   profile->codes = mymalloc(sizeof(unsigned char)*nPos);
   profile->vectors = NULL;
   profile->nVectors = 0;
@@ -6899,8 +6982,8 @@ profile_t *FreeProfile(profile_t *profile, int nPos, int nConstraints) {
     if(profile==NULL) return(NULL);
     myfree(profile->codes, nPos);
     myfree(profile->weights, nPos);
-    myfree(profile->vectors, sizeof(float)*nCodes*profile->nVectors);
-    myfree(profile->codeDist, sizeof(float)*nCodes*nPos);
+    myfree(profile->vectors, sizeof(numeric_t)*nCodes*profile->nVectors);
+    myfree(profile->codeDist, sizeof(numeric_t)*nCodes*nPos);
     if (nConstraints > 0) {
       myfree(profile->nOn, sizeof(int)*nConstraints);
       myfree(profile->nOff,  sizeof(int)*nConstraints);
@@ -7254,10 +7337,10 @@ double SplitSupport(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
   int iFreqC = 0;
   int iFreqD = 0;
   for (i = 0; i < nPos; i++) {
-    float *fA = GET_FREQ(pA, i, /*IN/OUT*/iFreqA);
-    float *fB = GET_FREQ(pB, i, /*IN/OUT*/iFreqB);
-    float *fC = GET_FREQ(pC, i, /*IN/OUT*/iFreqC);
-    float *fD = GET_FREQ(pD, i, /*IN/OUT*/iFreqD);
+    numeric_t *fA = GET_FREQ(pA, i, /*IN/OUT*/iFreqA);
+    numeric_t *fB = GET_FREQ(pB, i, /*IN/OUT*/iFreqB);
+    numeric_t *fC = GET_FREQ(pC, i, /*IN/OUT*/iFreqC);
+    numeric_t *fD = GET_FREQ(pD, i, /*IN/OUT*/iFreqD);
 
     weights[qAB][i] = pA->weights[i] * pB->weights[i];
     weights[qAC][i] = pA->weights[i] * pC->weights[i];
@@ -8942,7 +9025,7 @@ double PGamma(double x, double alpha)
   return IncompleteGamma(x*alpha,alpha,LnGamma(alpha));
 }
 
-//helper function to subtract timval structures
+/* helper function to subtract timval structures */
 /* Subtract the `struct timeval' values X and Y,
         storing the result in RESULT.
         Return 1 if the difference is negative, otherwise 0.  */
@@ -9718,7 +9801,7 @@ inline float mm_sum(register __m128 sum) {
 }
 #endif
 
-void vector_multiply(/*IN*/float *f1, /*IN*/float *f2, int n, /*OUT*/float *fOut) {
+void vector_multiply(/*IN*/numeric_t *f1, /*IN*/numeric_t *f2, int n, /*OUT*/numeric_t *fOut) {
 #ifdef USE_SSE3
   int i;
   for (i = 0; i < n; i += 4) {
@@ -9735,7 +9818,7 @@ void vector_multiply(/*IN*/float *f1, /*IN*/float *f2, int n, /*OUT*/float *fOut
 #endif
 }
 
-float vector_multiply_sum(/*IN*/float *f1, /*IN*/float *f2, int n) {
+numeric_t vector_multiply_sum(/*IN*/numeric_t *f1, /*IN*/numeric_t *f2, int n) {
 #ifdef USE_SSE3
   if (n == 4)
     return(f1[0]*f2[0]+f1[1]*f2[1]+f1[2]*f2[2]+f1[3]*f2[3]);
@@ -9751,7 +9834,7 @@ float vector_multiply_sum(/*IN*/float *f1, /*IN*/float *f2, int n) {
   return(mm_sum(sum));
 #else
   int i;
-  float out = 0.0;
+  numeric_t out = 0.0;
   for (i=0; i < n; i++)
     out += f1[i]*f2[i];
   return(out);
@@ -9759,7 +9842,7 @@ float vector_multiply_sum(/*IN*/float *f1, /*IN*/float *f2, int n) {
 }
 
 /* sum(f1*f2*f3) */
-float vector_multiply3_sum(/*IN*/float *f1, /*IN*/float *f2, /*IN*/float* f3, int n) {
+numeric_t vector_multiply3_sum(/*IN*/numeric_t *f1, /*IN*/numeric_t *f2, /*IN*/numeric_t* f3, int n) {
 #ifdef USE_SSE3
   __m128 sum = _mm_setzero_ps();
   int i;
@@ -9773,14 +9856,14 @@ float vector_multiply3_sum(/*IN*/float *f1, /*IN*/float *f2, /*IN*/float* f3, in
   return(mm_sum(sum));
 #else
   int i;
-  float sum = 0.0;
+  numeric_t sum = 0.0;
   for (i = 0; i < n; i++)
     sum += f1[i]*f2[i]*f3[i];
   return(sum);
 #endif
 }
 
-float vector_dot_product_rot(/*IN*/float *f1, /*IN*/float *f2, /*IN*/float *fBy, int n) {
+numeric_t vector_dot_product_rot(/*IN*/numeric_t *f1, /*IN*/numeric_t *f2, /*IN*/numeric_t *fBy, int n) {
 #ifdef USE_SSE3
   __m128 sum1 = _mm_setzero_ps();
   __m128 sum2 = _mm_setzero_ps();
@@ -9796,8 +9879,8 @@ float vector_dot_product_rot(/*IN*/float *f1, /*IN*/float *f2, /*IN*/float *fBy,
   return(mm_sum(sum1)*mm_sum(sum2));
 #else
   int i;
-  float out1 = 0.0;
-  float out2 = 0.0;
+  numeric_t out1 = 0.0;
+  numeric_t out2 = 0.0;
   for (i=0; i < n; i++) {
     out1 += f1[i]*fBy[i];
     out2 += f2[i]*fBy[i];
@@ -9806,7 +9889,7 @@ float vector_dot_product_rot(/*IN*/float *f1, /*IN*/float *f2, /*IN*/float *fBy,
 #endif
 }
 
-float vector_sum(/*IN*/float *f1, int n) {
+numeric_t vector_sum(/*IN*/numeric_t *f1, int n) {
 #ifdef USE_SSE3
   if (n==4)
     return(f1[0]+f1[1]+f1[2]+f1[3]);
@@ -9819,7 +9902,7 @@ float vector_sum(/*IN*/float *f1, int n) {
   }
   return(mm_sum(sum));
 #else
-  float out = 0.0;
+  numeric_t out = 0.0;
   int i;
   for (i = 0; i < n; i++)
     out += f1[i];
@@ -9827,7 +9910,7 @@ float vector_sum(/*IN*/float *f1, int n) {
 #endif
 }
 
-void vector_multiply_by(/*IN/OUT*/float *f, /*IN*/float fBy, int n) {
+void vector_multiply_by(/*IN/OUT*/numeric_t *f, /*IN*/numeric_t fBy, int n) {
   int i;
 #ifdef USE_SSE3
   __m128 c = _mm_set1_ps(fBy);
@@ -9843,7 +9926,7 @@ void vector_multiply_by(/*IN/OUT*/float *f, /*IN*/float fBy, int n) {
 #endif
 }
 
-void vector_add_mult(/*IN/OUT*/float *fTot, /*IN*/float *fAdd, float weight, int n) {
+void vector_add_mult(/*IN/OUT*/numeric_t *fTot, /*IN*/numeric_t *fAdd, numeric_t weight, int n) {
 #ifdef USE_SSE3
   int i;
   __m128 w = _mm_set1_ps(weight);
@@ -9860,7 +9943,7 @@ void vector_add_mult(/*IN/OUT*/float *fTot, /*IN*/float *fAdd, float weight, int
 #endif
 }
 
-void matrixt_by_vector4(/*IN*/float mat[4][MAXCODES], /*IN*/float vec[4], /*OUT*/float out[4]) {
+void matrixt_by_vector4(/*IN*/numeric_t mat[4][MAXCODES], /*IN*/numeric_t vec[4], /*OUT*/numeric_t out[4]) {
 #ifdef USE_SSE3
   /*__m128 v = _mm_load_ps(vec);*/
   __m128 o = _mm_setzero_ps();
