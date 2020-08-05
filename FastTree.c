@@ -317,7 +317,7 @@
 #define IS_ALIGNED(X) 1
 #endif
 
-#define FT_VERSION "2.1.0"
+#define FT_VERSION "2.1.1"
 
 char *usage =
   "  FastTree protein_alignment > tree\n"
@@ -579,6 +579,7 @@ typedef struct {
   /* codeFreq is the transpose of the eigeninv matrix is
      the rotated frequency vector for each code */
   float codeFreq[MAXCODES][MAXCODES];
+  float gapFreq[MAXCODES];
 } distance_matrix_t;
 
 
@@ -854,7 +855,7 @@ unsigned char *codesStringNT = (unsigned char*) "ACGT";
 unsigned char *codesString = NULL;
 
 distance_matrix_t *ReadDistanceMatrix(char *prefix);
-void SetupDistanceMatrix(/*IN/OUT*/distance_matrix_t *); /* set eigentot, codeFreq */
+void SetupDistanceMatrix(/*IN/OUT*/distance_matrix_t *); /* set eigentot, codeFreq, gapFreq */
 void ReadMatrix(char *filename, /*OUT*/float codes[MAXCODES][MAXCODES], bool check_codes);
 void ReadVector(char *filename, /*OUT*/float codes[MAXCODES]);
 alignment_t *ReadAlignment(/*READ*/FILE *fp); /* Returns a list of strings (exits on failure) */
@@ -3258,7 +3259,9 @@ void ReadTree(/*IN/OUT*/NJ_t *NJ,
   /* Verify that all sequences were seen */
   for (i = 0; i < unique->nUnique; i++) {
     if (parent[i] < 0) {
-      fprintf(stderr, "Alignment sequence %d (unique %d) absent from input tree\n", unique->uniqueFirst[i], i);
+      fprintf(stderr, "Alignment sequence %d (unique %d) absent from input tree\n"
+	      "The starting tree (the argument to -intree) must include all sequences in the alignment!\n",
+	      unique->uniqueFirst[i], i);
       exit(1);
     }
   }
@@ -4297,9 +4300,15 @@ void NormalizeFreq(/*IN/OUT*/float *freq, distance_matrix_t *dmat) {
     float inverse_weight = 1.0/total_freq;
     vector_multiply_by(/*IN/OUT*/freq, inverse_weight, nCodes);
   } else {
-    /* This can happen if we are in a very low-weight region, just set them all to small values */
-    for (k = 0; k < nCodes; k++)
-      freq[k] = 1.0/nCodes;
+    /* This can happen if we are in a very low-weight region, e.g. if a mostly-gap position gets weighted down
+       repeatedly; just set them all to arbitrary but legal values */
+    if (dmat == NULL) {
+      for (k = 0; k < nCodes; k++)
+	freq[k] = 1.0/nCodes;
+    } else {
+      for (k = 0; k < nCodes; k++)
+	freq[k] = dmat->codeFreq[0][k];/*XXX gapFreq[k];*/
+    }
   }
 }
 
@@ -4622,9 +4631,18 @@ void SetupDistanceMatrix(/*IN/OUT*/distance_matrix_t *dmat) {
   /* And compute codeFreq */
   int code;
   for(code = 0; code < nCodes; code++) {
-    for (k = 0; k < nCodes; k++)
+    for (k = 0; k < nCodes; k++) {
       dmat->codeFreq[code][k] = dmat->eigeninv[k][code];
+    }
   }
+  /* And gapFreq */
+  for(code = 0; code < nCodes; code++) {
+    double gapFreq = 0.0;
+    for (k = 0; k < nCodes; k++)
+      gapFreq += dmat->codeFreq[k][code];
+    dmat->gapFreq[code] = gapFreq / nCodes;
+  }
+
   if(verbose>10) fprintf(stderr, "Made codeFreq\n");
 }
 
