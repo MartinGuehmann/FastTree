@@ -1,6 +1,6 @@
 /*
  * FastTree -- neighbor joining for multiple sequence alignments using profiles
- * Morgan N. Price, January-October 2008
+ * Morgan N. Price, January-December 2008
  *
  *  Copyright (C) 2008 The Regents of the University of California
  *  All rights reserved.
@@ -221,11 +221,11 @@
 #endif
 
 char *usage =
-  "Usage for FastTree 1.0.1:\n"
+  "Usage for FastTree 1.0.2:\n"
   "FastTree [-quiet] [-boot 1000] [-seed 1253] [-nni 10] [-slow | -fastest]\n"
   "          [-top | -notop] [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
   "          [-matrix Matrix | -nomatrix] [-nj | -bionj]\n"
-  "          [-nt] [-n 100] [alignment] > newick_tree\n"
+  "          [-nt] [-n 100] [alignment] [-pseudo | -pseudo 1.0] > newick_tree\n"
   "\n"
   "or\n"
   "\n"
@@ -249,6 +249,11 @@ char *usage =
   "  To specify a different matrix, use -matrix FilePrefix or -nomatrix\n"
   "  Use -rawdist to turn the log-correction off\n"
   "  or to use %different instead of Jukes-Cantor\n"
+  "\n"
+  "  -pseudo [weight] -- Use pseudocounts to estimate distances between\n"
+  "      sequences with little or no overlap. (Off by default.) Recommended\n"
+  "      if analyzing the alignment has sequences with little or no overlap.\n"
+  "      If the weight is not specified, it is 1.0\n"
   "\n"
   "Nearest-neighbor interchanges:\n"
   "  By default, FastTree tries to improve the tree by doing log2(N)+1\n"
@@ -420,6 +425,12 @@ int nCodes=20;			/* 20 if protein, 4 if nucleotide */
 bool useMatrix=true;		/* If false, use %different as the uncorrected distance */
 bool logdist = true;		/* If true, do a log-correction (scoredist-like or Jukes-Cantor)
 				   but only during NNIs and support values, not during neighbor-joining */
+double pseudoWeight = 0.0;      /* The weight of pseudocounts to avoid artificial long branches when
+				   nearby sequences in the tree have little or no overlap
+				   (off by default). The prior distance is based on
+				   all overlapping positions among the quartet or triplet under
+				   consideration. The log correction takes place after the
+				   pseudocount is used. */
 
 /* Performance and memory usage */
 long profileOps = 0;		/* Full profile-based distance operations */
@@ -493,6 +504,17 @@ void ProfileDist(profile_t *profile1, profile_t *profile2, int nPos,
 void SeqDist(unsigned char *codes1, unsigned char *codes2, int nPos,
 	     /*OPTIONAL*/distance_matrix_t *distance_matrix,
 	     /*OUT*/besthit_t *hit);
+
+/* Computes all pairs of profile distances, applies pseudocounts
+   if pseudoWeight > 0, and applies log-correction if logdist is true.
+   The lower index is compared to the higher index, e.g. for profiles
+   A,B,C,D the comparison will be as in quartet_pair_t
+*/
+typedef enum {qAB,qAC,qAD,qBC,qBD,qCD} quartet_pair_t;
+void CorrectedPairDistances(profile_t **profiles, int nProfiles,
+			    /*OPTIONAL*/distance_matrix_t *distance_matrix,
+			    int nPos,
+			    /*OUT*/double *distances);
 
 /* Apply Jukes-Cantor or scoredist-like log(1-d) transform
    to correct the distance for multiple substitutions.
@@ -630,7 +652,7 @@ void ResetVisible(/*IN/UPDATE*/NJ_t *NJ, int nActive,
 */
 besthit_t *UniqueBestHits(NJ_t *NJ, int iNode, besthit_t *combined, int nCombined, /*OUT*/int *nUniqueOut);
 
-nni_t ChooseNNI(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
+nni_t ChooseNNI(profile_t *profiles[4],
 		/*OPTIONAL*/distance_matrix_t *dmat,
 		int nPos);
 
@@ -648,7 +670,7 @@ int NGaps(NJ_t *NJ, int node);	/* only handles leaf sequences */
    node cannot be root or a leaf
 */
 void SetupABCD(NJ_t *NJ, int node,
-	       /* the 4 profiles; the last one is an outprofile */
+	       /* the 4 profiles for ABCD; the last one is an outprofile */
 	       /*OUT*/profile_t *profiles[4], 
 	       /*IN/OUT*/profile_t **upProfiles,
 	       /*OUT*/int nodeABC[3]);
@@ -720,9 +742,9 @@ void RecomputeProfile(/*IN/OUT*/NJ_t *NJ, /*IN/OUT*/profile_t **upProfiles, int 
 /* If bionj is set, computes the weight to be given to A when computing the
    profile for the ancestor of A and B. C and D are the other profiles in the quartet
    If bionj is not set, returns -1 (which means unweighted in AverageProfile).
+   (A and B are the first two profiles in the array)
 */
-double QuartetWeight(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
-		     distance_matrix_t *dmat, int nPos);
+double QuartetWeight(profile_t *profiles[4], distance_matrix_t *dmat, int nPos);
 
 /* Returns a list of nodes, starting with node and ending with root */
 int *PathToRoot(NJ_t *NJ, int node, /*OUT*/int *depth);
@@ -815,6 +837,17 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[iArg],"-help") == 0) {
       fprintf(stderr,"%s",usage);
       exit(0);
+    } else if (strcmp(argv[iArg],"-pseudo") == 0) {
+      if (iArg < argc-1 && isdigit(argv[iArg+1][0])) {
+	iArg++;
+	pseudoWeight = atof(argv[iArg]);
+	if (pseudoWeight < 0.0) {
+	  fprintf(stderr,"Illegal argument to -pseudo: %s\n", argv[iArg]);
+	  exit(1);
+	}
+      } else {
+	pseudoWeight = 1.0;
+      }
     } else if (argv[iArg][0] == '-') {
       fprintf(stderr, "Unknown or incorrect use of option %s\n%s", argv[iArg], usage);
       exit(1);
@@ -864,6 +897,8 @@ int main(int argc, char **argv) {
 	    slow?"Exhaustive (slow)" : (fastest ? "Fastest" : "Normal (fast/relax)"),
 	    nniString,
 	    tophitString);
+    if (pseudoWeight > 0)
+      fprintf(stderr, "Pseudocount weight for comparing sequences with little overlap: %.3lf\n",pseudoWeight);
   }
 
   if (matrixPrefix != NULL) {
@@ -1956,6 +1991,41 @@ void SeqDist(unsigned char *codes1, unsigned char *codes2, int nPos,
   seqOps++;
 }
 
+void CorrectedPairDistances(profile_t **profiles, int nProfiles,
+			    /*OPTIONAL*/distance_matrix_t *distance_matrix,
+			    int nPos,
+			    /*OUT*/double *distances) {
+  assert(distances != NULL);
+  assert(profiles != NULL);
+  assert(nProfiles>1 && nProfiles <= 4);
+  besthit_t hit[6];
+  int iHit,i,j;
+
+  for (iHit=0, i=0; i < nProfiles; i++) {
+    for (j=i+1; j < nProfiles; j++, iHit++) {
+      ProfileDist(profiles[i],profiles[j],nPos,distance_matrix,/*OUT*/&hit[iHit]);
+      distances[iHit] = hit[iHit].dist;
+    }
+  }
+  if (pseudoWeight > 0) {
+    /* Estimate the prior distance */
+    double dTop = 0;
+    double dBottom = 0;
+    for (iHit=0; iHit < (nProfiles*(nProfiles-1))/2; iHit++) {
+      dTop += hit[iHit].dist * hit[iHit].weight;
+      dBottom += hit[iHit].weight;
+    }
+    double prior = (dBottom > 0.01) ? dTop/dBottom : 3.0;
+    for (iHit=0; iHit < (nProfiles*(nProfiles-1))/2; iHit++)
+      distances[iHit] = (distances[iHit] * hit[iHit].weight + prior * pseudoWeight)
+	/ (hit[iHit].weight + pseudoWeight);
+  }
+  if (logdist) {
+    for (iHit=0; iHit < (nProfiles*(nProfiles-1))/2; iHit++)
+      distances[iHit] = LogCorrect(distances[iHit]);
+  }
+}
+
 double LogCorrect(double dist) {
   const double maxscore = 3.0;
   if (nCodes == 4 && !useMatrix) { /* Jukes-Cantor */
@@ -2474,32 +2544,14 @@ void SetupDistanceMatrix(/*IN/OUT*/distance_matrix_t *dmat) {
 }
 
 
-nni_t ChooseNNI(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
+nni_t ChooseNNI(profile_t *profiles[4],
 		/*OPTIONAL*/distance_matrix_t *dmat,
 		int nPos) {
-  besthit_t h;
-  double dAB, dAC, dAD, dBC, dBD, dCD;
-
-  ProfileDist(pA, pB, nPos, dmat, /*OUT*/&h); dAB = h.dist;
-  ProfileDist(pA, pC, nPos, dmat, /*OUT*/&h); dAC = h.dist;
-  ProfileDist(pA, pD, nPos, dmat, /*OUT*/&h); dAD = h.dist;
-
-  ProfileDist(pB, pC, nPos, dmat, /*OUT*/&h); dBC = h.dist;
-  ProfileDist(pB, pD, nPos, dmat, /*OUT*/&h); dBD = h.dist;
-
-  ProfileDist(pC, pD, nPos, dmat, /*OUT*/&h); dCD = h.dist;
-
-  if (logdist) {
-    dAB = LogCorrect(dAB);
-    dAC = LogCorrect(dAC);
-    dAD = LogCorrect(dAD);
-    dBC = LogCorrect(dBC);
-    dBD = LogCorrect(dBD);
-    dCD = LogCorrect(dCD);
-  }
-  double critABvsCD = dAB + dCD;
-  double critACvsBD = dAC + dBD;
-  double critADvsBC = dAD + dBC;
+  double d[6];
+  CorrectedPairDistances(profiles, 4, dmat, nPos, /*OUT*/d);
+  double critABvsCD = d[qAB] + d[qCD];
+  double critACvsBD = d[qAC] + d[qBD];
+  double critADvsBC = d[qAD] + d[qBC];
 
   nni_t choice = ABvsCD;
   if (critACvsBD < critABvsCD && critACvsBD <= critADvsBC) {
@@ -2537,7 +2589,7 @@ void NNI(/*IN/OUT*/NJ_t *NJ) {
   if (NJ->nSeq <= 3)
     return;			/* nothing to do */
 
-  /* For each node the upProfile */
+  /* For each node the upProfile or NULL */
   profile_t **upProfiles = UpProfiles(NJ);
   
   traversal_t traversal = InitTraversal(NJ);
@@ -2555,9 +2607,7 @@ void NNI(/*IN/OUT*/NJ_t *NJ) {
     int nodeB = nodeABC[1];
     int nodeC = nodeABC[2];
 
-    nni_t choice = ChooseNNI(profiles[0], profiles[1], profiles[2], profiles[3],
-			     NJ->distance_matrix,
-			     NJ->nPos);
+    nni_t choice = ChooseNNI(profiles, NJ->distance_matrix, NJ->nPos);
     if(verbose>1 && choice != ABvsCD)
       fprintf(stderr,"Swap A=%d B=%d C=%d D=out(C) -- choose %s\n",
 	      nodeA, nodeB, nodeC, choice == ACvsBD ? "AC|BD" : "AD|BC");
@@ -2624,8 +2674,7 @@ void RecomputeProfile(/*IN/OUT*/NJ_t *NJ, /*IN/OUT*/profile_t **upProfiles, int 
   profile_t *profiles[4];
   int nodeABC[3];
   SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
-  double weight = QuartetWeight(profiles[0],profiles[1],profiles[2],profiles[3],
-				NJ->distance_matrix, NJ->nPos);
+  double weight = QuartetWeight(profiles, NJ->distance_matrix, NJ->nPos);
   if (verbose>2)
     fprintf(stderr, "Recompute %d from %d %d weight %.3f\n",
 	    node, NJ->child[node].child[0], NJ->child[node].child[1], weight);
@@ -2638,31 +2687,14 @@ void RecomputeProfile(/*IN/OUT*/NJ_t *NJ, /*IN/OUT*/profile_t **upProfiles, int 
 /* The BIONJ-like formula for the weight of A when building a profile for AB is
      1/2 + (avgD(B,CD) - avgD(A,CD))/(2*d(A,B))
 */
-double QuartetWeight(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
-		     distance_matrix_t *dmat, int nPos) {
+double QuartetWeight(profile_t *profiles[4], distance_matrix_t *dmat, int nPos) {
   if (!bionj)
     return(-1.0); /* even weighting */
-
-  double dAB, dAC, dAD, dBC, dBD;
-  besthit_t h;
-
-  ProfileDist(pA, pB, nPos, dmat, /*OUT*/&h); dAB = h.dist;
-  if (dAB < 0.01)
+  double d[6];
+  CorrectedPairDistances(profiles, 4, dmat, nPos, /*OUT*/d);
+  if (d[qAB] < 0.01)
     return -1.0;
-  ProfileDist(pA, pC, nPos, dmat, /*OUT*/&h); dAC = h.dist;
-  ProfileDist(pA, pD, nPos, dmat, /*OUT*/&h); dAD = h.dist;
-
-  ProfileDist(pB, pC, nPos, dmat, /*OUT*/&h); dBC = h.dist;
-  ProfileDist(pB, pD, nPos, dmat, /*OUT*/&h); dBD = h.dist;
-
-  if (logdist) {
-    dAB = LogCorrect(dAB);
-    dAC = LogCorrect(dAC);
-    dAD = LogCorrect(dAD);
-    dBC = LogCorrect(dBC);
-    dBD = LogCorrect(dBD);
-  }
-  double weight = 0.5 + ((dBC+dBD)-(dAC+dAD))/(4*dAB);
+  double weight = 0.5 + ((d[qBC]+d[qBD])-(d[qAC]+d[qAD]))/(4*d[qAB]);
   if (weight < 0)
     weight = 0;
   if (weight > 1)
@@ -2736,40 +2768,18 @@ void UpdateBranchLengths(/*IN/OUT*/NJ_t *NJ) {
 	profileB = NJ->profiles[sib];
 	profileC = GetUpProfile(/*IN/OUT*/upProfiles, NJ, NJ->parent[node]);
       }
-      besthit_t h;
-      double dAB, dAC, dBC;
-      ProfileDist(profileA, profileB, NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dAB = h.dist;
-      ProfileDist(profileA, profileC, NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dAC = h.dist;
-      ProfileDist(profileB, profileC, NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dBC = h.dist;
-      if (logdist) {
-	dAB = LogCorrect(dAB);
-	dAC = LogCorrect(dAC);
-	dBC = LogCorrect(dBC);
-      }
-      NJ->branchlength[node] = (dAB+dAC-dBC)/2.0;
+      profile_t *profiles[3] = {profileA,profileB,profileC};
+      double d[3]; /*AB,AC,BC*/
+      CorrectedPairDistances(profiles, 3, NJ->distance_matrix, NJ->nPos, /*OUT*/d);
+      /* d(A,BC) = (dAB+dAC-dBC)/2 */
+      NJ->branchlength[node] = (d[0]+d[1]-d[2])/2.0;
     } else {
       profile_t *profiles[4];
       int nodeABC[3];
       SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
-
-      besthit_t h;
-      double dAB, dAC, dAD, dBC, dBD, dCD;
-      ProfileDist(profiles[0], profiles[1], NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dAB = h.dist;
-      ProfileDist(profiles[0], profiles[2], NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dAC = h.dist;
-      ProfileDist(profiles[0], profiles[3], NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dAD = h.dist;
-      ProfileDist(profiles[1], profiles[2], NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dBC = h.dist;
-      ProfileDist(profiles[1], profiles[3], NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dBD = h.dist;
-      ProfileDist(profiles[2], profiles[3], NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dCD = h.dist;
-
-      if (logdist) {
-	dAB = LogCorrect(dAB);
-	dAC = LogCorrect(dAC);
-	dAD = LogCorrect(dAD);
-	dBC = LogCorrect(dBC);
-	dBD = LogCorrect(dBD);
-	dCD = LogCorrect(dCD);
-      }
-      NJ->branchlength[node] = (dAC+dAD+dBC+dBD)/4.0 - (dAB+dCD)/2.0;
+      double d[6];
+      CorrectedPairDistances(profiles, 4, NJ->distance_matrix, NJ->nPos, /*OUT*/d);
+      NJ->branchlength[node] = (d[qAC]+d[qAD]+d[qBC]+d[qBD])/4.0 - (d[qAB]+d[qCD])/2.0;
       
       /* no longer needed */
       DeleteUpProfile(upProfiles, NJ, nodeABC[0]);
@@ -2925,7 +2935,6 @@ double SplitSupport(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
   int i,j;
 
   /* Note distpieces are weighted */
-  const int AB=0, AC=1, AD=2, BC=3, BD=4, CD=5;
   double *distpieces[6];
   double *weights[6];
   for (j = 0; j < 6; j++) {
@@ -2943,19 +2952,19 @@ double SplitSupport(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
     float *fC = GET_FREQ(pC, i, /*IN/OUT*/iFreqC);
     float *fD = GET_FREQ(pD, i, /*IN/OUT*/iFreqD);
 
-    weights[AB][i] = pA->weights[i] * pB->weights[i];
-    weights[AC][i] = pA->weights[i] * pC->weights[i];
-    weights[AD][i] = pA->weights[i] * pD->weights[i];
-    weights[BC][i] = pB->weights[i] * pC->weights[i];
-    weights[BD][i] = pB->weights[i] * pD->weights[i];
-    weights[CD][i] = pC->weights[i] * pD->weights[i];
+    weights[qAB][i] = pA->weights[i] * pB->weights[i];
+    weights[qAC][i] = pA->weights[i] * pC->weights[i];
+    weights[qAD][i] = pA->weights[i] * pD->weights[i];
+    weights[qBC][i] = pB->weights[i] * pC->weights[i];
+    weights[qBD][i] = pB->weights[i] * pD->weights[i];
+    weights[qCD][i] = pC->weights[i] * pD->weights[i];
 
-    distpieces[AB][i] = weights[AB][i] * ProfileDistPiece(pA->codes[i], pB->codes[i], fA, fB, dmat, NULL);
-    distpieces[AC][i] = weights[AC][i] * ProfileDistPiece(pA->codes[i], pC->codes[i], fA, fC, dmat, NULL);
-    distpieces[AD][i] = weights[AD][i] * ProfileDistPiece(pA->codes[i], pD->codes[i], fA, fD, dmat, NULL);
-    distpieces[BC][i] = weights[BC][i] * ProfileDistPiece(pB->codes[i], pC->codes[i], fB, fC, dmat, NULL);
-    distpieces[BD][i] = weights[BD][i] * ProfileDistPiece(pB->codes[i], pD->codes[i], fB, fD, dmat, NULL);
-    distpieces[CD][i] = weights[CD][i] * ProfileDistPiece(pC->codes[i], pD->codes[i], fC, fD, dmat, NULL);
+    distpieces[qAB][i] = weights[qAB][i] * ProfileDistPiece(pA->codes[i], pB->codes[i], fA, fB, dmat, NULL);
+    distpieces[qAC][i] = weights[qAC][i] * ProfileDistPiece(pA->codes[i], pC->codes[i], fA, fC, dmat, NULL);
+    distpieces[qAD][i] = weights[qAD][i] * ProfileDistPiece(pA->codes[i], pD->codes[i], fA, fD, dmat, NULL);
+    distpieces[qBC][i] = weights[qBC][i] * ProfileDistPiece(pB->codes[i], pC->codes[i], fB, fC, dmat, NULL);
+    distpieces[qBD][i] = weights[qBD][i] * ProfileDistPiece(pB->codes[i], pD->codes[i], fB, fD, dmat, NULL);
+    distpieces[qCD][i] = weights[qCD][i] * ProfileDistPiece(pC->codes[i], pD->codes[i], fC, fD, dmat, NULL);
   }
   assert(iFreqA == pA->nVectors);
   assert(iFreqB == pB->nVectors);
@@ -2980,8 +2989,8 @@ double SplitSupport(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
   /* Support1 = Support(AB|CD over AC|BD) = d(A,C)+d(B,D)-d(A,B)-d(C,D)
      Support2 = Support(AB|CD over AD|BC) = d(A,D)+d(B,C)-d(A,B)-d(C,D)
   */
-  double support1 = dists[AC] + dists[BD] - dists[AB] - dists[CD];
-  double support2 = dists[AD] + dists[BC] - dists[AB] - dists[CD];
+  double support1 = dists[qAC] + dists[qBD] - dists[qAB] - dists[qCD];
+  double support2 = dists[qAD] + dists[qBC] - dists[qAB] - dists[qCD];
 
   if (support1 < 0 || support2 < 0) {
     nSuboptimalSplits++;	/* Another split seems superior */
@@ -3008,8 +3017,8 @@ double SplitSupport(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
       if (logdist)
 	dists[j] = LogCorrect(dists[j]);
     }
-    support1 = dists[AC] + dists[BD] - dists[AB] - dists[CD];
-    support2 = dists[AD] + dists[BC] - dists[AB] - dists[CD];
+    support1 = dists[qAC] + dists[qBD] - dists[qAB] - dists[qCD];
+    support2 = dists[qAD] + dists[qBC] - dists[qAB] - dists[qCD];
     if (support1 > 0 && support2 > 0)
       nSupport++;
   } /* end loop over bootstrap replicates */
@@ -3939,8 +3948,8 @@ profile_t *GetUpProfile(/*IN/OUT*/profile_t **upProfiles, NJ_t *NJ, int outnode)
       profile_t *profiles[4];
       int nodeABC[3];
       SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
-      double weight = QuartetWeight(profiles[2], profiles[3], profiles[0], profiles[1],
-				    NJ->distance_matrix, NJ->nPos);
+      profile_t *profilesCDAB[4] = { profiles[2], profiles[3], profiles[0], profiles[1] };
+      double weight = QuartetWeight(profilesCDAB, NJ->distance_matrix, NJ->nPos);
       if (verbose>2)
 	fprintf(stderr, "Compute upprofile of %d from %d and parents (vs. children %d %d) with weight %.3f\n",
 		node, nodeABC[2], nodeABC[0], nodeABC[1], weight);
