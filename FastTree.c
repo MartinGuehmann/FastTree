@@ -319,12 +319,15 @@
 #define IS_ALIGNED(X) 1
 #endif
 
-#define FT_VERSION "2.1.4"
+#define FT_VERSION "2.1.5"
 
 char *usage =
   "  FastTree protein_alignment > tree\n"
+  "  FastTree < protein_alignment > tree\n"
+  "  FastTree -out tree protein_alignment\n"
   "  FastTree -nt nucleotide_alignment > tree\n"
   "  FastTree -nt -gtr < nucleotide_alignment > tree\n"
+  "  FastTree < nucleotide_alignment > tree\n"
   "FastTree accepts alignments in fasta or phylip interleaved formats\n"
   "\n"
   "Common options (must be before the alignment file):\n"
@@ -342,9 +345,9 @@ char *usage =
   "  -pseudo to use pseudocounts (recommended for highly gapped sequences)\n"
   "  -gtr -- generalized time-reversible model (nucleotide alignments only)\n"
   "  -wag -- Whelan-And-Goldman 2001 model (amino acid alignments only)\n"
-  "  -quote -- allow spaces and other restricted characters (but not ' characters) in\n"
-  "             sequence names and quote names in the output tree (fasta input only;\n"
-  "             FastTree will not be able to read these trees back in\n"
+  "  -quote -- allow spaces and other restricted characters (but not ' ) in\n"
+  "           sequence names and quote names in the output tree (fasta input only;\n"
+  "           FastTree will not be able to read these trees back in)\n"
   "  -noml to turn off maximum-likelihood\n"
   "  -nome to turn off minimum-evolution NNIs and SPRs\n"
   "        (recommended if running additional ML NNIs with -intree)\n"
@@ -372,7 +375,7 @@ char *expertUsage =
   "           [ -constraints constraintAlignment [ -constraintWeight 100.0 ] ]\n"
   "           [-log logfile]\n"
   "         [ alignment_file ]\n"
-  "        > newick_tree\n"
+  "        [ -out output_newick_file | > newick_tree]\n"
   "\n"
   "or\n"
   "\n"
@@ -1614,10 +1617,16 @@ int main(int argc, char **argv) {
   bool bUseGtrFreq = false;
   double gtrfreq[4] = {0.25,0.25,0.25,0.25};
   bool bQuote = false;
+  FILE *fpOut = stdout;
 
   if (isatty(STDIN_FILENO) && argc == 1) {
     fprintf(stderr,"Usage for FastTree version %s %s%s:\n%s",
 	    FT_VERSION, SSE_STRING, OpenMPString(), usage);
+#if (defined _WIN32 || defined WIN32 || defined WIN64 || defined _WIN64)
+    fprintf(stderr, "Windows users: Please remember to run this inside a command shell\n");
+    fprintf(stderr,"Hit return to continue\n");
+    fgetc(stdin);
+#endif
     exit(0);
   }    
   for (iArg = 1; iArg < argc; iArg++) {
@@ -1821,6 +1830,13 @@ int main(int argc, char **argv) {
       logfile = argv[iArg];
     } else if (strcmp(argv[iArg],"-gamma") == 0) {
       gammaLogLk = true;
+    } else if (strcmp(argv[iArg],"-out") == 0 && iArg < argc-1) {
+      iArg++;
+      fpOut = fopen(argv[iArg],"w");
+      if(fpOut==NULL) {
+	fprintf(stderr,"Cannot write to %s\n",argv[iArg]);
+	exit(1);
+      }
     } else if (argv[iArg][0] == '-') {
       fprintf(stderr, "Unknown or incorrect use of option %s\n%s", argv[iArg], usage);
       exit(1);
@@ -2383,8 +2399,8 @@ int main(int argc, char **argv) {
 #endif
 	fflush(fp);
       }
-      PrintNJ(stdout, NJ, aln->names, unique, /*support*/nBootstrap > 0, bQuote);
-      fflush(stdout);
+      PrintNJ(fpOut, NJ, aln->names, unique, /*support*/nBootstrap > 0, bQuote);
+      fflush(fpOut);
       if (fpLog) {
 	fprintf(fpLog,"TreeCompleted\n");
 	fflush(fpLog);
@@ -2400,6 +2416,7 @@ int main(int argc, char **argv) {
   } /* end loop over alignments */
   if (fpLog != NULL)
     fclose(fpLog);
+  if (fpOut != stdout) fclose(fpOut);
   exit(0);
 }
 
