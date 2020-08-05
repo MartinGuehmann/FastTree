@@ -1,6 +1,6 @@
 /*
  * FastTree -- neighbor joining for multiple sequence alignments using profiles
- * Morgan N. Price, January-April 2008
+ * Morgan N. Price, January-September 2008
  *
  *  Copyright (C) 2008 The Regents of the University of California
  *  All rights reserved.
@@ -199,8 +199,6 @@
  * other nodes with better hits if we find them, and we set the
  * visible entry for the new joined node to the best entry in its
  * top-hit list.
- *
- * Morgan N. Price, March 2008
  */
 
 #include <stdio.h>
@@ -213,69 +211,82 @@
 #include <ctype.h>
 #include <malloc.h>
 
-char *usage = "Usage for FastTree 0.9.1:\n"
-              "FastTree [-quiet] [-boot 1000] [-slow | -fastest]\n"
-              "          [-top | -notop]\n"
-              "          [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
-              "          [-matrix Matrix | -nomatrix] [-nj | -bionj]\n"
-              "          [-nt] [alignment] > newick_tree\n"
-              "\n"
-              "or\n"
-              "\n"
-              "FastTree [-nt] [-matrix Matrix | -nomatrix] [-logdist] -makematrix [alignment]\n"
-              "    > phylip_distance_matrix\n"
-              "\n"
-              "  FastTree supports fasta or phylip interleaved alignments\n"
-              "  By default FastTree expects protein alignments,  use -nt for nucleotides\n"
-              "  FastTree reads standard input if no alignment file is given\n"
-              "\n"
-              "Distances:\n"
-              "  By default, FastTree uses the BLOSUM45 matrix for protein sequences\n"
-              "  and fraction-different as a distance for nucleotides\n"
-              "  To specify a different matrix, use -matrix FilePrefix or -nomatrix\n"
-              "\n"
-              "Searching for the best join:\n"
-              "  by default, FastTree combines the 'visible set' of fast neighbor-joining with\n"
-              "      local hill-climbing as in relaxed neighbor-joining\n"
-              "  -slow -- exhaustive search (standard NJ or BIONJ, but different gap handling)\n"
-              "  -fastest -- search the visible set (the top hit for each node) only\n"
-              "      Unlike the original fast neighbor-joining, -fastest updates visible(C)\n"
-              "      after joining A and B if join(AB,C) is better than join(C,visible(C))\n"
-              "\n"
-              "Top-hit heuristics:\n"
-              "  by default, FastTree uses a top-hit list to speed up search\n"
-              "  use -notop (or -slow) to turn this feature off\n"
-              "         and compare all leaves to each other,\n"
-              "         and all new joined nodes to each other\n"
-              "  -topm 1.0 -- set the top-hit list size to parameter*sqrt(N)\n"
-              "         FastTree estimates the top m hits of a leaf from the\n"
-              "         top 2*m hits of a 'close' neighbor, where close is\n"
-              "         defined as d(seed,close) < 0.75 * d(seed, hit of rank 2*m),\n"
-              "         and updates the top-hits as joins proceed\n"
-              "  -close 0.75 -- modify the close heuristic, lower is more conservative\n"
-              "  -refresh 0.8 -- compare a joined node to all other nodes if its\n"
-              "         top-hit list is less than 80% of the desired length,\n"
-              "         or if the age of the top-hit list is log2(m) or greater\n"
-              "\n"
-              "Join options:\n"
-              "  -bionj: weighted joins as in BIONJ (default)\n"
-              "  -nj: regular (unweighted) neighbor-joining\n"
-              "\n"
-              "Support value options:\n"
-              "  by default, FastTree computes support by a maximum-of-normals test\n"
-              "  This test approximates a local form of bootstrap.\n"
-              "\n"
-              "   -boot 1000 -- Compute local bootstrap, where the argument is the\n"
-              "          number of replicates. Reported support values still range from\n"
-              "          0 to 1. Local bootstrap does not recompute the topology for each\n" 
-              "          replicate, so it is very fast.\n"
-              "\n";
+char *usage =
+  "Usage for FastTree 1.0.0:\n"
+  "FastTree [-quiet] [-boot 1000] [-seed 1253] [-nni 10] [-slow | -fastest]\n"
+  "          [-top | -notop] [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
+  "          [-matrix Matrix | -nomatrix] [-nj | -bionj]\n"
+  "          [-nt] [-n 100] [alignment] > newick_tree\n"
+  "\n"
+  "or\n"
+  "\n"
+  "FastTree [-nt] [-matrix Matrix | -nomatrix] [-rawdist] -makematrix [alignment]\n"
+  "    [-n 100] > phylip_distance_matrix\n"
+  "\n"
+  "  FastTree supports fasta or phylip interleaved alignments\n"
+  "  By default FastTree expects protein alignments,  use -nt for nucleotides\n"
+  "  FastTree reads standard input if no alignment file is given\n"
+  "\n"
+  "  Use -n if you want to read multiple alignments in. This only\n"
+  "  works with phylip interleaved format. For example, you can\n"
+  "  use it with the output from phylip's seqboot. If you use -n, FastTree\n"
+  "  will write 1 tree per line to standard output. You might also\n"
+  "  want to use -quiet to eliminate status messages to standard error.\n"
+  "\n"
+  "Distances:\n"
+  "  By default, FastTree uses the BLOSUM45 matrix for protein sequences\n"
+  "  and fraction-different as a distance for nucleotides\n"
+  "  To specify a different matrix, use -matrix FilePrefix or -nomatrix\n"
+  "\n"
+  "Nearest-neighbor interchanges:\n"
+  "  By default, FastTree tries to improve the tree by doing log2(N)+1\n"
+  "  rounds of nearest-neighbor interchanges (NNI), where N is the number of\n"
+  "  unique sequences. Use -nni to set the number of rounds of NNI. If\n"
+  "  FastTree reports 'Bad splits: 0/' then additional rounds will probably\n"
+  "  have no effect.\n"
+  "\n"
+  "Support value options:\n"
+  "  by default, FastTree computes a local bootstrap with 1,000 resamples.\n"
+  "  The support values are proportions ranging from 0 to 1\n"
+  "  The local bootstrap does not recompute topologies, so it is very fast\n"
+  "\n"
+  "  Use -boot 0 to turn off bootstrap or -boot 100 to use 100 resamples\n"
+  "  Use -seed to initialize the random number generator\n"
+  "\n"
+  "Searching for the best join:\n"
+  "  By default, FastTree combines the 'visible set' of fast neighbor-joining with\n"
+  "      local hill-climbing as in relaxed neighbor-joining\n"
+  "  -slow -- exhaustive search (standard NJ or BIONJ, but different gap handling)\n"
+  "  -fastest -- search the visible set (the top hit for each node) only\n"
+  "      Unlike the original fast neighbor-joining, -fastest updates visible(C)\n"
+  "      after joining A and B if join(AB,C) is better than join(C,visible(C))\n"
+  "\n"
+  "Top-hit heuristics:\n"
+  "  by default, FastTree uses a top-hit list to speed up search\n"
+  "  use -notop (or -slow) to turn this feature off\n"
+  "         and compare all leaves to each other,\n"
+  "         and all new joined nodes to each other\n"
+  "  -topm 1.0 -- set the top-hit list size to parameter*sqrt(N)\n"
+  "         FastTree estimates the top m hits of a leaf from the\n"
+  "         top 2*m hits of a 'close' neighbor, where close is\n"
+  "         defined as d(seed,close) < 0.75 * d(seed, hit of rank 2*m),\n"
+  "         and updates the top-hits as joins proceed\n"
+  "  -close 0.75 -- modify the close heuristic, lower is more conservative\n"
+  "  -refresh 0.8 -- compare a joined node to all other nodes if its\n"
+  "         top-hit list is less than 80% of the desired length,\n"
+  "         or if the age of the top-hit list is log2(m) or greater\n"
+  "\n"
+  "Join options:\n"
+  "  -bionj: weighted joins as in BIONJ (default)\n"
+  "  -nj: regular (unweighted) neighbor-joining\n"
+  "\n";
 
 typedef struct {
   int nPos;
   int nSeq;
   char **names;
   char **seqs;
+  int nSaved; /* actual allocated size of names and seqs */
 } alignment_t;
 
 #define MAXCODES 20
@@ -345,8 +356,8 @@ typedef struct {
   /* The input */
   int nSeq;
   int nPos;
-  char **seqs;			/* a copy of the aligment sequences array */
-  distance_matrix_t *distance_matrix; /* or NULL if using %identity distance */
+  char **seqs;			/* the aligment sequences array (not reallocated) */
+  distance_matrix_t *distance_matrix; /* a pointer (not reallocated), or NULL if using %identity distance */
 
   /* The profile data structures */
   int maxnode;			/* The next index to allocate */
@@ -376,6 +387,9 @@ typedef struct {
   float *support;		/* 1 for high-confidence nodes */
 } NJ_t;
 
+/* Describes which switch to do */
+typedef enum {ABvsCD,ACvsBD,ADvsBC} nni_t;
+
 /* Global variables */
 /* Options */
 int verbose = 1;
@@ -387,9 +401,10 @@ double tophitsClose = 0.75;	/* Parameter for how close is close; also used as a 
 double tophitsRefresh = 0.8;	/* Refresh if fraction of top-hit-length drops to this */
 double staleOutLimit = 0.02;	/* nActive changes by at most this amount before we recompute */
 int nRecomputeOutProfile = 200;	/* Recompute out-profile every this many joins (avoid roundoff) */
-int nBootstrap = 0;		/* If set, number of replicates of local bootstrap to do */
+int nBootstrap = 1000;		/* If set, number of replicates of local bootstrap to do */
 int nCodes=20;			/* 20 if protein, 4 if nucleotide */
 bool useMatrix=true;
+bool logdist = true;
 
 /* Performance and memory usage */
 long profileOps = 0;		/* Full profile-based distance operations */
@@ -399,6 +414,7 @@ long nBetter = 0;		/* Number of hill-climbing steps */
 long nCloseUsed = 0;		/* Number of "close" neighbors we avoid full search for */
 long nRefreshTopHits = 0;	/* Number of full-blown searches (interior nodes) */
 long nVisibleReset = 0;		/* Number of resets of the visible set */
+long nNNI = 0;
 long nSuboptimalSplits = 0;	/* Number of splits that are rejected given full topology */
 long nProfileFreqAlloc = 0;
 long nProfileFreqAvoid = 0;
@@ -415,11 +431,16 @@ distance_matrix_t *ReadDistanceMatrix(char *prefix);
 void SetupDistanceMatrix(/*IN/OUT*/distance_matrix_t *); /* set eigentot, codeFreq */
 void ReadMatrix(char *filename, /*OUT*/float codes[MAXCODES][MAXCODES], bool check_codes);
 void ReadVector(char *filename, /*OUT*/float codes[MAXCODES]);
-alignment_t *ReadAlignment(/*IN*/char *filename); /* Returns a list of strings (exits on failure) */
+alignment_t *ReadAlignment(/*IN*/FILE *fp); /* Returns a list of strings (exits on failure) */
+alignment_t *FreeAlignment(alignment_t *); /* returns NULL */
+
 NJ_t *InitNJ(char **sequences, int nSeqs, int nPos,
 	     /*IN OPTIONAL*/distance_matrix_t *); /* Allocates memory, initializes */
+NJ_t *FreeNJ(NJ_t *NJ); /* returns NULL */
 void FastNJ(/*IN/OUT*/NJ_t *NJ); /* Does the joins */
 void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ);	  /* Estimates the reliability of the joins */
+void NNI(/*IN/OUT*/NJ_t *NJ);  /* Nearest-neighbor interchanges */
+void UpdateBranchLengths(/*IN/OUT*/NJ_t *NJ); /* Recomputes all branch lengths */
 void PrintNJ(FILE *, NJ_t *NJ, char **names, int *uniqueFirst, int *nameNext);
 
 /* Use out-profile and NJ->totdiam to recompute out-distance for node iNode
@@ -435,23 +456,33 @@ void SetCriterion(/*IN/UPDATE*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join)
 /* Computes weight and distance and then sets the criterion (maybe update out-distances) */
 void SetDistCriterion(/*IN/UPDATE*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *join);
 
-/* Reports the support for the (1,2) vs. (3,4) split */
+/* Reports the support for the (1,2) vs. (3,4) split
+   col[iBoot*nPos+j] is column j for bootstrap iBoot
+*/
 double SplitSupport(profile_t *p1, profile_t *p2, profile_t *p3, profile_t *p4,
 		    /*OPTIONAL*/distance_matrix_t *dmat,
-		    int nPos);
+		    int nPos,
+		    int *col);
 
 profile_t *SeqToProfile(NJ_t *NJ, char *seq, int nPos, int iNode);
 
 /* ProfileDist and SeqDist only set the dist and weight fields
    If using an outprofile, use the second argument of ProfileDist
    for better performance.
- */
+
+   These produce uncorrected distances.
+*/
 void ProfileDist(profile_t *profile1, profile_t *profile2, int nPos,
 		 /*OPTIONAL*/distance_matrix_t *distance_matrix,
 		 /*OUT*/besthit_t *hit);
 void SeqDist(unsigned char *codes1, unsigned char *codes2, int nPos,
 	     /*OPTIONAL*/distance_matrix_t *distance_matrix,
 	     /*OUT*/besthit_t *hit);
+
+/* Apply Jukes-Cantor or scoredist-like log(1-d) transform
+   to correct the distance for multiple substitutions.
+*/
+double LogCorrect(double distance);
 
 /* AverageProfile is used to do a weighted combination of nodes
    when doing a join. If weight is negative, then the value is ignored and the profiles
@@ -477,7 +508,8 @@ profile_t *FreeProfile(profile_t *profile, int nPos); /* returns NULL */
 
 
 /* f1 can be NULL if code1 != NOCODE, and similarly for f2
-   Do not call if either weight was 0
+   Or, if (say) weight1 was 0, then can have code1==NOCODE *and* f1==NULL
+   In that case, returns an arbitrary large number.
 */
 double ProfileDistPiece(unsigned int code1, unsigned int code2,
 			float *f1, float *f2, 
@@ -583,17 +615,36 @@ void ResetVisible(/*IN/UPDATE*/NJ_t *NJ, int nActive,
 */
 besthit_t *UniqueBestHits(NJ_t *NJ, int iNode, besthit_t *combined, int nCombined, /*OUT*/int *nUniqueOut);
 
+nni_t ChooseNNI(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
+		/*OPTIONAL*/distance_matrix_t *dmat,
+		int nPos);
+
+/* Sets NJ->parent[newchild] and replaces oldchild with newchild
+   in the list of children of parent
+*/
+void ReplaceChild(/*IN/OUT*/NJ_t *NJ, int parent, int oldchild, int newchild);
 
 int CompareHitsByCriterion(const void *c1, const void *c2);
 int CompareHitsByJ(const void *c1, const void *c2);
 
 int NGaps(NJ_t *NJ, int node);	/* only handles leaf sequences */
 
+/* node is the parent of AB, sibling of C, nephew of D
+   node cannot be root or a leaf
+*/
+void SetupABCD(NJ_t *NJ, int node,
+	       /* the 4 profiles; the last one is an outprofile */
+	       /*OUT*/profile_t *profiles[4], 
+	       /*IN/OUT*/profile_t **upProfiles,
+	       /*OUT*/int nodeABC[3]);
+
 int Sibling(NJ_t *NJ, int node); /* At root, no unique sibling so returns -1 */
+void RootSiblings(NJ_t *NJ, int node, /*OUT*/int sibs[2]);
 
 void *mymalloc(size_t sz);       /* Prints "Out of memory" and exits on failure */
 void *myfree(void *, size_t sz); /* Always returns NULL */
 
+void ran_start(long seed);
 double knuth_rand();		/* Random number between 0 and 1 */
 
 /* Like mymalloc; duplicates the input (returns NULL if given NULL) */
@@ -618,7 +669,7 @@ typedef struct {
 typedef int hashiterator_t;
 
 hashstrings_t *MakeHashtable(char **strings, int nStrings);
-hashstrings_t *DeleteHashtable(hashstrings_t* hash); /*returns NULL*/
+hashstrings_t *FreeHashtable(hashstrings_t* hash); /*returns NULL*/
 hashiterator_t FindMatch(hashstrings_t *hash, char *string);
 
 /* Return NULL if we have run out of values */
@@ -626,21 +677,60 @@ char *GetHashString(hashstrings_t *hash, hashiterator_t hi);
 int HashCount(hashstrings_t *hash, hashiterator_t hi);
 int HashFirst(hashstrings_t *hash, hashiterator_t hi);
 
+/* Routines to support tree traversal */
+typedef bool *traversal_t;
+traversal_t InitTraversal(NJ_t*);
+traversal_t FreeTraversal(traversal_t, NJ_t*); /*returns NULL*/
+
+/* returns new node, or -1 if nothing left to do. Use root for the first call.
+   Will return every node and then root.
+   Uses postorder tree traversal (depth-first search going down to leaves first)
+*/
+int TraversePostorder(int lastnode, NJ_t *NJ, /*IN/OUT*/traversal_t);
+
+/* Routines to support storing up-profiles during tree traversal
+   Eventually these should be smart enough to do weighted joins and
+   to minimize memory usage
+*/
+profile_t **UpProfiles(NJ_t *NJ);
+profile_t *GetUpProfile(/*IN/OUT*/profile_t **upProfiles, NJ_t *NJ, int node);
+profile_t *DeleteUpProfile(/*IN/OUT*/profile_t **upProfiles, NJ_t *NJ, int node); /* returns NULL */
+profile_t **FreeUpProfiles(profile_t **upProfiles, NJ_t *NJ); /* returns NULL */
+
+/* Recomputes the profile for a node, presumably to reflect topology changes
+   If bionj is set, does a weighted join -- which requires using upProfiles
+ */
+void RecomputeProfile(/*IN/OUT*/NJ_t *NJ, /*IN/OUT*/profile_t **upProfiles, int node);
+
+/* If bionj is set, computes the weight to be given to A when computing the
+   profile for the ancestor of A and B. C and D are the other profiles in the quartet
+   If bionj is not set, returns -1 (which means unweighted in AverageProfile).
+*/
+double QuartetWeight(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
+		     distance_matrix_t *dmat, int nPos);
+
+/* Returns a list of nodes, starting with node and ending with root */
+int *PathToRoot(NJ_t *NJ, int node, /*OUT*/int *depth);
+int *FreePath(int *path, NJ_t *NJ); /* returns NULL */
+
 /* The default amino acid distance matrix, derived from the BLOSUM45 similarity matrix */
 distance_matrix_t matrixBLOSUM45;
 
 int main(int argc, char **argv) {
+  int nAlign = 1; /* number of alignments to read */
   int iArg;
   char *matrixPrefix = NULL;
   distance_matrix_t *distance_matrix = NULL;
   bool make_matrix = false;
-  bool logdist = false;
+  int nni = -1;			/* number of rounds of NNI, defaults to log2(n)+1 */
 
   for (iArg = 1; iArg < argc; iArg++) {
     if (strcmp(argv[iArg],"-makematrix") == 0) {
       make_matrix = true;
     } else if (strcmp(argv[iArg],"-logdist") == 0) {
-      logdist = true;
+      fprintf(stderr, "Warning: logdist is now on by default and obsolete\n");
+    } else if (strcmp(argv[iArg],"-rawdist") == 0) {
+      logdist = false;
     } else if (strcmp(argv[iArg],"-verbose") == 0 && iArg < argc-1) {
       verbose = atoi(argv[++iArg]);
     } else if (strcmp(argv[iArg],"-quiet") == 0) {
@@ -654,6 +744,13 @@ int main(int argc, char **argv) {
       matrixPrefix = argv[iArg];
     } else if (strcmp(argv[iArg], "-nomatrix") == 0) {
       useMatrix = false;
+    } else if (strcmp(argv[iArg], "-n") == 0 && iArg < argc-1) {
+      iArg++;
+      nAlign = atoi(argv[iArg]);
+      if (nAlign < 1) {
+	fprintf(stderr, "-n argument for #input alignments must be > 0 not %s\n", argv[iArg]);
+	exit(1);
+      }
     } else if (strcmp(argv[iArg], "-nt") == 0) {
       nCodes = 4;
     } else if (strcmp(argv[iArg], "-nj") == 0) {
@@ -663,6 +760,10 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[iArg], "-boot") == 0 && iArg < argc-1) {
       iArg++;
       nBootstrap = atoi(argv[iArg]);
+    } else if (strcmp(argv[iArg], "-seed") == 0 && iArg < argc-1) {
+      iArg++;
+      long seed = atol(argv[iArg]);
+      ran_start(seed);
     } else if (strcmp(argv[iArg],"-top") == 0) {
       if(tophitsMult < 0.01)
 	tophitsMult = 1.0;
@@ -693,6 +794,9 @@ int main(int argc, char **argv) {
 	fprintf(stderr, "-refresh argument must be between 0 and 1\n");
 	exit(1);
       }
+    } else if (strcmp(argv[iArg],"-nni") == 0 && iArg < argc-1) {
+      iArg++;
+      nni = atoi(argv[iArg]);
     } else if (strcmp(argv[iArg],"-help") == 0) {
       fprintf(stderr,"%s",usage);
       exit(0);
@@ -720,24 +824,29 @@ int main(int argc, char **argv) {
   if (slow && tophitsMult > 0) {
     tophitsMult = 0.0;
   }
-  if (logdist && !make_matrix) {
-    fprintf(stderr,"Log-corrected distances are only supported for -makematrix not neighbor joining\n");
-    exit(1);
-  }
 
   if (verbose && !make_matrix) {		/* Report settings */
     char tophitString[100] = "no";
     if(tophitsMult>0) sprintf(tophitString,"%.2f*sqrtN close=%.2f refresh=%.2f",
 			      tophitsMult, tophitsClose, tophitsRefresh);
-    char supportString[100] = "max-norm";
-    if (nBootstrap>0) sprintf(supportString,"Boot %d",nBootstrap);
-    fprintf(stderr,"Alignment: %s\n%s distances: %s Method: %s Support: %s\nSearch: %s TopHits: %s\n",
-	    fileName ? fileName : "(stdin)",
+    char supportString[100] = "none";
+    if (nBootstrap>0) sprintf(supportString,"Local boot %d",nBootstrap);
+    char nniString[100] = "(no NNI)";
+    if (nni > 0)
+      sprintf(nniString, "+NNI (%d rounds)", nni);
+    if (nni == -1)
+      strcpy(nniString, "+NNI");
+
+    fprintf(stderr,"Alignment: %s", fileName != NULL ? fileName : "standard input");
+    if (nAlign>1)
+      fprintf(stderr, " (%d alignments)", nAlign);
+    fprintf(stderr,"\n%s distances: %s Method: %s Support: %s\nSearch: %s %s TopHits: %s\n",
 	    nCodes == 20 ? "Amino acid" : "Nucleotide",
 	    matrixPrefix ? matrixPrefix : (useMatrix? "BLOSUM45 (default)" : "%different"),
 	    bionj ? "BIONJ" : "neighbor-joining" ,
 	    supportString,
 	    slow?"Exhaustive (slow)" : (fastest ? "Fastest" : "Normal (fast/relax)"),
+	    nniString,
 	    tophitString);
   }
 
@@ -755,123 +864,171 @@ int main(int argc, char **argv) {
     distance_matrix = NULL;
   }
 
-  alignment_t *aln = ReadAlignment(fileName);
-  if (aln->nSeq < 1) {
-    fprintf(stderr, "No alignment sequences\n");
+  int iAln;
+  FILE *fpIn = fileName != NULL ? fopen(fileName, "r") : stdin;
+  if (fpIn == NULL) {
+    fprintf(stderr, "Cannot read %s\n", fileName);
     exit(1);
   }
-  /* Check that all names are unique */
-  hashstrings_t *hashnames = MakeHashtable(aln->names, aln->nSeq);
-  int i;
-  for (i=0; i<aln->nSeq; i++) {
-    hashiterator_t hi = FindMatch(hashnames,aln->names[i]);
-    if (HashCount(hashnames,hi) != 1) {
-      fprintf(stderr,"Non-unique name %s in the alignment\n",aln->names[i]);
+
+  for(iAln = 0; iAln < nAlign; iAln++) {
+    alignment_t *aln = ReadAlignment(fpIn);
+    if (aln->nSeq < 1) {
+      fprintf(stderr, "No alignment sequences\n");
       exit(1);
     }
-  }
-  hashnames = DeleteHashtable(hashnames);
 
-  /* Make a list of unique sequences -- note some lists are bigger than required */
-  int nUniqueSeq = 0;
-  char **uniqueSeq = (char**)mymalloc(aln->nSeq * sizeof(char*)); /* iUnique -> seq */
-  int *uniqueFirst = (int*)mymalloc(aln->nSeq * sizeof(int)); /* iUnique -> iFirst in aln */
-  int *nameNext = (int*)mymalloc(aln->nSeq * sizeof(int)); /* i in aln -> next, or -1 */
-
-  for (i = 0; i < aln->nSeq; i++) {
-    uniqueSeq[i] = NULL;
-    uniqueFirst[i] = -1;
-    nameNext[i] = -1;
-  }
-  hashstrings_t *hashseqs = MakeHashtable(aln->seqs, aln->nSeq);
-  for (i=0; i<aln->nSeq; i++) {
-    hashiterator_t hi = FindMatch(hashseqs,aln->seqs[i]);
-    int first = HashFirst(hashseqs,hi);
-    if (first == i) {
-      uniqueSeq[nUniqueSeq] = aln->seqs[i];
-      uniqueFirst[nUniqueSeq] = i;
-      nUniqueSeq++;
-    } else {
-      int last = first;
-      while (nameNext[last] != -1)
-	last = nameNext[last];
-      assert(last>=0);
-      nameNext[last] = i;
-    }
-  }
-  assert(nUniqueSeq>0);
-  hashseqs = DeleteHashtable(hashseqs);
-  
-  if (verbose>1) fprintf(stderr, "read %s seqs %d (%d unique) positions %d nameLast %s seqLast %s\n",
-			 fileName ? fileName : "standard input",
-			 aln->nSeq, nUniqueSeq, aln->nPos, aln->names[aln->nSeq-1], aln->seqs[aln->nSeq-1]);
-
-  clock_t clock_start = clock();
-  if (make_matrix) {
-    NJ_t *NJ = InitNJ(aln->seqs, aln->nSeq, aln->nPos, distance_matrix);
-    printf("   %d\n",aln->nSeq);
-    int i,j;
-    for(i = 0; i < NJ->nSeq; i++) {
-      printf("%s",aln->names[i]);
-      for (j = 0; j < NJ->nSeq; j++) {
-	besthit_t hit;
-	SeqDist(NJ->profiles[i]->codes,NJ->profiles[j]->codes,NJ->nPos,NJ->distance_matrix,/*OUT*/&hit);
-	if(logdist) {
-	  hit.dist = hit.dist < 0.99 ? -1.3*log(1.0-hit.dist) : 3.0;
-	  if(hit.dist > 3.0) hit.dist = 3.0;
-	}
-	printf(" %f", hit.dist);
+    /* Check that all names are unique */
+    hashstrings_t *hashnames = MakeHashtable(aln->names, aln->nSeq);
+    int i;
+    for (i=0; i<aln->nSeq; i++) {
+      hashiterator_t hi = FindMatch(hashnames,aln->names[i]);
+      if (HashCount(hashnames,hi) != 1) {
+	fprintf(stderr,"Non-unique name %s in the alignment\n",aln->names[i]);
+	exit(1);
       }
-      printf("\n");
     }
-    exit(0);
-  }
-  /* else */
-  NJ_t *NJ = InitNJ(uniqueSeq, nUniqueSeq, aln->nPos, distance_matrix);
-  FastNJ(NJ);
+    hashnames = FreeHashtable(hashnames);
 
-  /* profile-frequencies for the "up-profiles" in ReliabilityNJ take only diameter(Tree)*L*a
-     space not N*L*a space, because we can free them as we go.
-     And up-profile by their nature tend to be complicated.
-     So save the profile-frequency counters now to exclude later results.
-  */
+    /* Make a list of unique sequences -- note some lists are bigger than required */
+    int nUniqueSeq = 0;
+    char **uniqueSeq = (char**)mymalloc(aln->nSeq * sizeof(char*)); /* iUnique -> seq */
+    int *uniqueFirst = (int*)mymalloc(aln->nSeq * sizeof(int)); /* iUnique -> iFirst in aln */
+    int *nameNext = (int*)mymalloc(aln->nSeq * sizeof(int)); /* i in aln -> next, or -1 */
+
+    for (i = 0; i < aln->nSeq; i++) {
+      uniqueSeq[i] = NULL;
+      uniqueFirst[i] = -1;
+      nameNext[i] = -1;
+    }
+    hashstrings_t *hashseqs = MakeHashtable(aln->seqs, aln->nSeq);
+    for (i=0; i<aln->nSeq; i++) {
+      hashiterator_t hi = FindMatch(hashseqs,aln->seqs[i]);
+      int first = HashFirst(hashseqs,hi);
+      if (first == i) {
+	uniqueSeq[nUniqueSeq] = aln->seqs[i];
+	uniqueFirst[nUniqueSeq] = i;
+	nUniqueSeq++;
+      } else {
+	int last = first;
+	while (nameNext[last] != -1)
+	  last = nameNext[last];
+	assert(last>=0);
+	nameNext[last] = i;
+      }
+    }
+    assert(nUniqueSeq>0);
+    hashseqs = FreeHashtable(hashseqs);
+    
+    if (verbose>1) fprintf(stderr, "read %s seqs %d (%d unique) positions %d nameLast %s seqLast %s\n",
+			   fileName ? fileName : "standard input",
+			   aln->nSeq, nUniqueSeq, aln->nPos, aln->names[aln->nSeq-1], aln->seqs[aln->nSeq-1]);
+
+    clock_t clock_start = clock();
+    if (make_matrix) {
+      NJ_t *NJ = InitNJ(aln->seqs, aln->nSeq, aln->nPos, distance_matrix);
+      printf("   %d\n",aln->nSeq);
+      int i,j;
+      for(i = 0; i < NJ->nSeq; i++) {
+	printf("%s",aln->names[i]);
+	for (j = 0; j < NJ->nSeq; j++) {
+	  besthit_t hit;
+	  SeqDist(NJ->profiles[i]->codes,NJ->profiles[j]->codes,NJ->nPos,NJ->distance_matrix,/*OUT*/&hit);
+	  if (logdist)
+	    hit.dist = LogCorrect(hit.dist);
+	  printf(" %f", hit.dist);
+	}
+	printf("\n");
+      }
+    } else {
+      /* reset counters*/
+      profileOps = 0;
+      outprofileOps = 0;
+      seqOps = 0;
+      nBetter = 0;
+      nCloseUsed = 0;
+      nRefreshTopHits = 0;
+      nVisibleReset = 0;
+      nNNI = 0;
+      nSuboptimalSplits = 0;
+      nProfileFreqAlloc = 0;
+      nProfileFreqAvoid = 0;
+      szAllAlloc = 0;
+      mymallocUsed = 0;
+      maxmallocHeap = 0;
+
+      /* build tree */
+      NJ_t *NJ = InitNJ(uniqueSeq, nUniqueSeq, aln->nPos, distance_matrix);
+      FastNJ(NJ);
+
+      /* profile-frequencies for the "up-profiles" in ReliabilityNJ take only diameter(Tree)*L*a
+	 space not N*L*a space, because we can free them as we go.
+	 And up-profile by their nature tend to be complicated.
+	 So save the profile-frequency memory allocation counters now to exclude later results.
+      */
 #ifdef TRACK_MEMORY
-  long svProfileFreqAlloc = nProfileFreqAlloc;
-  long svProfileFreqAvoid = nProfileFreqAvoid;
+      long svProfileFreqAlloc = nProfileFreqAlloc;
+      long svProfileFreqAvoid = nProfileFreqAvoid;
 #endif
 
-  if(verbose>1) fprintf(stderr, "Topology done after %.2f sec -- computing support values\n",
-			(clock()-clock_start)/(double)CLOCKS_PER_SEC);
-  ReliabilityNJ(NJ);
-  fflush(stderr);
-  PrintNJ(stdout, NJ, aln->names, uniqueFirst, nameNext);
-  fflush(stdout);
-  if(verbose) {
-    fprintf(stderr, "Unique sequences: %d/%d Bad splits: %ld/%d",
-	    NJ->nSeq, aln->nSeq,
-	    nSuboptimalSplits, NJ->nSeq >= 3 ? NJ->nSeq-3 : 0);
-    if(!slow) fprintf(stderr, " Hill-climb: %ld Update-best: %ld",
-		      nBetter, nVisibleReset);
-    fprintf(stderr,"\n");
-    if (nCloseUsed>0 || nRefreshTopHits>0)
-      fprintf(stderr, "Top hits: close neighbors %ld/%d refreshes %ld\n",
-	      nCloseUsed, NJ->nSeq, nRefreshTopHits);
-    double dN2 = NJ->nSeq*(double)NJ->nSeq;
-    fprintf(stderr, "Time %.2f Distances per N*N: by-profile %.3f (out %.3f) by-leaf %.3f\n",
-	    (clock()-clock_start)/(double)CLOCKS_PER_SEC,
-	    profileOps/dN2, outprofileOps/dN2, seqOps/dN2);
+      if (nni == -1)
+	nni = 1 + (int)(0.5 + log(NJ->nSeq)/log(2));
+      if (nni>0) {
+	int i;
+	if(verbose>0) fprintf(stderr, "Initial topology in %.2f sec. Doing %d rounds of nearest-neighbor interchanges\n",
+			      (clock()-clock_start)/(double)CLOCKS_PER_SEC, nni);
+	for (i=0; i < nni; i++) {
+	  if(verbose>1) {
+	    fprintf(stderr, "Topology before NNI round %d\n",i);
+	    fflush(stderr);
+	    PrintNJ(stderr, NJ, aln->names, uniqueFirst, nameNext);
+	  }
+	  NNI(/*IN/OUT*/NJ);
+	}
+	UpdateBranchLengths(/*IN/OUT*/NJ);
+      }
+
+      if (nBootstrap > 0) {
+	if(verbose>0) fprintf(stderr, "Topology done after %.2f sec -- computing support values\n",
+			      (clock()-clock_start)/(double)CLOCKS_PER_SEC);
+	fflush(stderr);
+	ReliabilityNJ(NJ);
+      }
+      if(verbose) {
+	fprintf(stderr, "Unique: %d/%d Bad splits: %ld/%d",
+		NJ->nSeq, aln->nSeq,
+		nSuboptimalSplits, NJ->nSeq >= 3 ? NJ->nSeq-3 : 0);
+	if(!slow) fprintf(stderr, " Hill-climb: %ld Update-best: %ld NNI: %ld",
+			  nBetter, nVisibleReset, nNNI);
+	fprintf(stderr,"\n");
+	if (nCloseUsed>0 || nRefreshTopHits>0)
+	  fprintf(stderr, "Top hits: close neighbors %ld/%d refreshes %ld\n",
+		  nCloseUsed, NJ->nSeq, nRefreshTopHits);
+	double dN2 = NJ->nSeq*(double)NJ->nSeq;
+	fprintf(stderr, "Time %.2f Distances per N*N: by-profile %.3f (out %.3f) by-leaf %.3f\n",
+		(clock()-clock_start)/(double)CLOCKS_PER_SEC,
+		profileOps/dN2, outprofileOps/dN2, seqOps/dN2);
 #ifdef TRACK_MEMORY
-    fprintf(stderr, "Memory: %.2f MB (%.1f byte/pos) ",
-	    maxmallocHeap/1.0e6, maxmallocHeap/(double)(aln->nSeq*(double)aln->nPos));
-    /* Only report numbers from before we do reliability estimates */
-    fprintf(stderr, "profile-freq-alloc %ld avoided %.2f%%\n", 
-	    svProfileFreqAlloc,
-	    svProfileFreqAvoid > 0 ?
-	    100.0*svProfileFreqAvoid/(double)(svProfileFreqAlloc+svProfileFreqAvoid)
-	    : 0);
+	fprintf(stderr, "Memory: %.2f MB (%.1f byte/pos) ",
+		maxmallocHeap/1.0e6, maxmallocHeap/(double)(aln->nSeq*(double)aln->nPos));
+	/* Only report numbers from before we do reliability estimates */
+	fprintf(stderr, "profile-freq-alloc %ld avoided %.2f%%\n", 
+		svProfileFreqAlloc,
+		svProfileFreqAvoid > 0 ?
+		100.0*svProfileFreqAvoid/(double)(svProfileFreqAlloc+svProfileFreqAvoid)
+		: 0);
 #endif
-  }
-  fflush(stderr);
+      }
+      fflush(stderr);
+      PrintNJ(stdout, NJ, aln->names, uniqueFirst, nameNext);
+      fflush(stdout);
+      FreeNJ(NJ);
+    } /* end build tree */
+    uniqueSeq = myfree(uniqueSeq, aln->nSeq * sizeof(char*));
+    uniqueFirst = myfree(uniqueFirst, aln->nSeq * sizeof(int));
+    nameNext = myfree(nameNext, aln->nSeq * sizeof(int));
+    FreeAlignment(aln);
+  } /* end loop over alignments */
   exit(0);
 }
 
@@ -936,10 +1093,32 @@ NJ_t *InitNJ(char **sequences, int nSeq, int nPos,
   NJ->support = (float *)mymalloc(sizeof(float)*NJ->maxnodes);
   for (iNode = 0; iNode < NJ->maxnodes; iNode++) NJ->support[iNode] = -1.0;
 
-  NJ->child = (children_t*)malloc(sizeof(children_t)*NJ->maxnodes);
+  NJ->child = (children_t*)mymalloc(sizeof(children_t)*NJ->maxnodes);
   for (iNode= 0; iNode < NJ->maxnode; iNode++) NJ->child[iNode].nChild = 0;
 
   return(NJ);
+}
+
+NJ_t *FreeNJ(NJ_t *NJ) {
+  if (NJ==NULL)
+    return(NJ);
+
+  int i;
+  for (i=0; i < NJ->maxnode; i++)
+    NJ->profiles[i] = FreeProfile(NJ->profiles[i], NJ->nPos);
+  NJ->profiles = myfree(NJ->profiles, sizeof(profile_t*) * NJ->maxnodes);
+  NJ->outprofile = FreeProfile(NJ->outprofile, NJ->nPos);
+  NJ->diameter = myfree(NJ->diameter, sizeof(float)*NJ->maxnodes);
+  NJ->varDiameter = myfree(NJ->varDiameter, sizeof(float)*NJ->maxnodes);
+  NJ->selfdist = myfree(NJ->selfdist, sizeof(float)*NJ->maxnodes);
+  NJ->selfweight = myfree(NJ->selfweight, sizeof(float)*NJ->maxnodes);
+  NJ->outDistances = myfree(NJ->outDistances, sizeof(float)*NJ->maxnodes);
+  NJ->nOutDistActive = myfree(NJ->nOutDistActive, sizeof(int)*NJ->maxnodes);
+  NJ->parent = myfree(NJ->parent, sizeof(int)*NJ->maxnodes);
+  NJ->branchlength = myfree(NJ->branchlength, sizeof(float)*NJ->maxnodes);
+  NJ->support = myfree(NJ->support, sizeof(float)*NJ->maxnodes);
+  NJ->child = myfree(NJ->child, sizeof(children_t)*NJ->maxnodes);
+  return(myfree(NJ, sizeof(NJ_t)));
 }
 
 void FastNJ(NJ_t *NJ) {
@@ -1051,7 +1230,7 @@ void FastNJ(NJ_t *NJ) {
     double bionjWeight = 0.5;	/* IJ = bionjWeight*I + (1-bionjWeight)*J */
     double varIJ = rawIJ - NJ->varDiameter[join.i] - NJ->varDiameter[join.j];
 
-    if (bionj && join.weight > 0 && varIJ > 0) {
+    if (bionj && join.weight > 0.01 && varIJ > 0.001) {
       /* Set bionjWeight according to the BIONJ formula, where
 	 the variance matrix is approximated by
 
@@ -1089,7 +1268,8 @@ void FastNJ(NJ_t *NJ) {
 
       double deltaProfileVarOut = (nActive-2) * (varJTop/varJWeight - varITop/varIWeight);
       double deltaVarDiam = (nActive-2)*(NJ->varDiameter[join.i] - NJ->varDiameter[join.j]);
-      bionjWeight = 0.5 + (deltaProfileVarOut+deltaVarDiam)/(2*(nActive-2)*varIJ);
+      if (varJWeight > 0.01 && varIWeight > 0.01)
+	bionjWeight = 0.5 + (deltaProfileVarOut+deltaVarDiam)/(2*(nActive-2)*varIJ);
       if(bionjWeight<0) bionjWeight=0;
       if(bionjWeight>1) bionjWeight=1;
       if (verbose>2) fprintf(stderr,"dVarO %f dVarDiam %f varIJ %f from dist %f weight %f (pos %d) bionjWeight %f %f\n",
@@ -1390,7 +1570,7 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names,
   }
 
   typedef struct { int node; int end; } stack_t;
-  stack_t *stack = (stack_t *)malloc(sizeof(stack_t)*NJ->maxnodes);
+  stack_t *stack = (stack_t *)mymalloc(sizeof(stack_t)*NJ->maxnodes);
   int stackSize = 1;
   stack[0].node = NJ->root;
   stack[0].end = 0;
@@ -1421,8 +1601,12 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names,
       /* Print the branch length */
       fprintf(fp, ":%.5f", NJ->branchlength[node]);
     } else if (end) {
-      if (node == NJ->root) fprintf(fp, ")");
-      else fprintf(fp, ")%.3f:%.5f", NJ->support[node], NJ->branchlength[node]);
+      if (node == NJ->root)
+	fprintf(fp, ")");
+      else if (nBootstrap > 0)
+	fprintf(fp, ")%.3f:%.5f", NJ->support[node], NJ->branchlength[node]);
+      else
+	fprintf(fp, "):%.5f", NJ->branchlength[node]);
     } else {
       if (node != NJ->root && NJ->child[NJ->parent[node]].child[0] != node) fprintf(fp, ",");
       fprintf(fp, "(");
@@ -1443,27 +1627,21 @@ void PrintNJ(FILE *fp, NJ_t *NJ, char **names,
   stack = myfree(stack, sizeof(stack_t)*NJ->maxnodes);
 }
 
-alignment_t *ReadAlignment(/*IN*/char *filename) {
-  FILE *fp = filename != NULL ? fopen(filename,"r") : stdin;
-  if (fp == NULL) {
-    fprintf(stderr, "Cannot read %s\n", filename);
-    exit(1);
-  }
+alignment_t *ReadAlignment(/*IN*/FILE *fp) {
   int nSeq = 0;
   int nPos = 0;
   char **names = NULL;
   char **seqs = NULL;
   char buf[BUFFER_SIZE] = "";
   if (fgets(buf,sizeof(buf),fp) == NULL) {
-    fprintf(stderr, "Error reading header line from %s\n",
-	    filename ? filename : "standard input");
+    fprintf(stderr, "Error reading header line\n");
     exit(1);
   }
+  int nSaved = 100;
   if (buf[0] == '>') {
     /* FASTA, truncate names at any of these */
     char *nameStop = "(),: \t\r\n";
     char *seqSkip = " \t\r\n";
-    int nSaved = 100;
     seqs = (char**)mymalloc(sizeof(char*) * nSaved);
     names = (char**)mymalloc(sizeof(char*) * nSaved);
 
@@ -1533,16 +1711,23 @@ alignment_t *ReadAlignment(/*IN*/char *filename) {
   } else {
     /* PHYLIP interleaved-like format
        Allow arbitrary length names, require spaces between names and sequences
+       Allow multiple alignments, either separated by a single empty line (e.g. seqboot output)
+       or not.
      */
+    if (buf[0] == '\n' || buf[0] == '\r') {
+      if (fgets(buf,sizeof(buf),fp) == NULL) {
+	fprintf(stderr, "Empty header line followed by EOF\n");
+	exit(1);
+      }
+    }
     if (sscanf(buf, "%d%d", &nSeq, &nPos) != 2
       || nSeq < 1 || nPos < 1) {
-      fprintf(stderr, "Error parsing header line from %s:\n%s\n",
-	      filename ? filename : "standard input",
-	      buf);
+      fprintf(stderr, "Error parsing header line:%s\n", buf);
       exit(1);
     }
     names = (char **)mymalloc(sizeof(char*) * nSeq);
     seqs = (char **)mymalloc(sizeof(char*) * nSeq);
+    nSaved = nSeq;
 
     int i;
     for (i = 0; i < nSeq; i++) {
@@ -1609,6 +1794,8 @@ alignment_t *ReadAlignment(/*IN*/char *filename) {
 	seqs[iSeq][seqlen] = '\0'; /* null-terminate */
 	if(verbose>10) fprintf(stderr,"Read iSeq %d name %s seqsofar %s\n", iSeq, names[iSeq], seqs[iSeq]);
 	iSeq++;
+	if (iSeq == nSeq && strlen(seqs[0]) == nPos)
+	  break; /* finished alignment */
       } /* end else non-empty phylip line */
     }
     if (iSeq != nSeq && iSeq != 0) {
@@ -1644,11 +1831,9 @@ alignment_t *ReadAlignment(/*IN*/char *filename) {
   if (findDot)
     fprintf(stderr, "Warning! Found \".\" character(s). These are treated as gaps\n");
 
-  if (filename != NULL) {
-    if (fclose(fp) != 0) {
-      fprintf(stderr, "Error reading %s\n",filename);
-      exit(1);
-    }
+  if (ferror(fp)) {
+    fprintf(stderr, "Error reading input file\n");
+    exit(1);
   }
 
   alignment_t *align = (alignment_t*)mymalloc(sizeof(alignment_t));
@@ -1656,9 +1841,23 @@ alignment_t *ReadAlignment(/*IN*/char *filename) {
   align->nPos = nPos;
   align->names = names;
   align->seqs = seqs;
+  align->nSaved = nSaved;
   return(align);
 }
 
+alignment_t *FreeAlignment(alignment_t *aln) {
+  if(aln==NULL)
+    return(NULL);
+  int i;
+  for (i = 0; i < aln->nSeq; i++) {
+    aln->names[i] = myfree(aln->names[i],strlen(aln->names[i])+1);
+    aln->seqs[i] = myfree(aln->seqs[i], aln->nPos+1);
+  }
+  aln->names = myfree(aln->names, sizeof(char*)*aln->nSaved);
+  aln->seqs = myfree(aln->seqs, sizeof(char*)*aln->nSaved);
+  myfree(aln, sizeof(alignment_t));
+  return(NULL);
+}
 
 profile_t *SeqToProfile(NJ_t *NJ, char *seq, int nPos, int iNode) {
   static unsigned char charToCode[256];
@@ -1729,9 +1928,19 @@ void SeqDist(unsigned char *codes1, unsigned char *codes2, int nPos,
       }
     }
   }
-  seqOps++;
   hit->weight = (double)nUse;
   hit->dist = nUse > 0 ? top/(double)nUse : 1.0;
+  seqOps++;
+}
+
+double LogCorrect(double dist) {
+  const double maxscore = 3.0;
+  if (nCodes == 4 && !useMatrix) { /* Jukes-Cantor */
+    dist = dist < 0.74 ? -0.75*log(1.0 - dist * 4.0/3.0) : maxscore;
+  } else {			/* scoredist-like */
+    dist = dist < 0.99 ? -1.3*log(1.0 - dist) : maxscore;
+  }
+  return (dist < maxscore ? dist : maxscore);
 }
 
 /* A helper function -- f1 and f2 can be NULL if the corresponding code != NOCODE
@@ -1748,11 +1957,11 @@ double ProfileDistPiece(unsigned int code1, unsigned int code2,
     } else { /* f1 vs f2 */
       int k;
       if (f1 == NULL) {
-	assert(code1 != NOCODE);
+	if(code1 == NOCODE) return(10.0);
 	f1 = &dmat->codeFreq[code1][0];
       }
       if (f2 == NULL) {
-	assert(code2 != NOCODE);
+	if(code2 ==NOCODE) return(10.0);
 	f2 = &dmat->codeFreq[code2][0];
       }
       double piece = 0;
@@ -1761,19 +1970,20 @@ double ProfileDistPiece(unsigned int code1, unsigned int code2,
       return(piece);
     }
   } else {
+    /* no matrix */
     if (code1 != NOCODE) {
       if (code2 != NOCODE) {
 	return(code1 == code2 ? 0.0 : 1.0); /* code1 vs code2 */
       } else {
-	assert(f2 != NULL);
+	if(f2 == NULL) return(10.0);
 	return(1.0 - f2[code1]); /* code1 vs. f2 */
       }
     } else {
       if (code2 != NOCODE) {
-	assert(f1 != NULL);
+	if(f1 == NULL) return(10.0);
 	return(1.0 - f1[code2]); /* f1 vs code2 */
-      } else {
-	assert(f1 != NULL && f2 != NULL);	/* f1 vs. f2 */
+      } else { /* f1 vs. f2 */
+	if (f1 == NULL || f2 == NULL) return(10.0);
 	double piece = 1.0;
 	int k;
 	for (k = 0; k < nCodes; k++) {
@@ -2152,10 +2362,6 @@ void ReadMatrix(char *filename, /*OUT*/float codes[MAXCODES][MAXCODES], bool che
       }
     }
   }
-  if (fclose(fp) != 0) {
-    fprintf(stderr, "Error reading %s\n",filename);
-    exit(1);
-  }
 }
 
 void ReadVector(char *filename, /*OUT*/float codes[MAXCODES]) {
@@ -2244,6 +2450,313 @@ void SetupDistanceMatrix(/*IN/OUT*/distance_matrix_t *dmat) {
   if(verbose>10) fprintf(stderr, "Made codeFreq\n");
 }
 
+
+nni_t ChooseNNI(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
+		/*OPTIONAL*/distance_matrix_t *dmat,
+		int nPos) {
+  besthit_t h;
+  double dAB, dAC, dAD, dBC, dBD, dCD;
+
+  ProfileDist(pA, pB, nPos, dmat, /*OUT*/&h); dAB = h.dist;
+  ProfileDist(pA, pC, nPos, dmat, /*OUT*/&h); dAC = h.dist;
+  ProfileDist(pA, pD, nPos, dmat, /*OUT*/&h); dAD = h.dist;
+
+  ProfileDist(pB, pC, nPos, dmat, /*OUT*/&h); dBC = h.dist;
+  ProfileDist(pB, pD, nPos, dmat, /*OUT*/&h); dBD = h.dist;
+
+  ProfileDist(pC, pD, nPos, dmat, /*OUT*/&h); dCD = h.dist;
+
+  if (logdist) {
+    dAB = LogCorrect(dAB);
+    dAC = LogCorrect(dAC);
+    dAD = LogCorrect(dAD);
+    dBC = LogCorrect(dBC);
+    dBD = LogCorrect(dBD);
+    dCD = LogCorrect(dCD);
+  }
+  double critABvsCD = dAB + dCD;
+  double critACvsBD = dAC + dBD;
+  double critADvsBC = dAD + dBC;
+
+  nni_t choice = ABvsCD;
+  if (critACvsBD < critABvsCD && critACvsBD <= critADvsBC) {
+    choice = ACvsBD;
+  } else if (critADvsBC < critABvsCD && critADvsBC <= critACvsBD) {
+    choice = ADvsBC;
+  }
+  if (choice != ABvsCD)
+    nNNI++ ;
+  return(choice);
+}
+
+void NNI(/*IN/OUT*/NJ_t *NJ) {
+  /* For each non-root node N, with children A,B, sibling C, and uncle D,
+     we compare the current topology AB|CD to the alternate topologies
+     AC|BD and AD|BC, by using log-corrected distances on profiles.
+     (If logdist is false, then the log correction is not done.)
+     It then selects the best topology.
+
+     Regardless of whether it changes the topology, it recomputes the
+     profile for the node, using the pairwise distances and BIONJ-like
+     weightings. The parent's profile has changed, but recomputing it
+     is not necessary because we will visit it before we need it (we
+     use postorder, so we may visit the sibling and its children
+     before we visit the parent, but we never consider an ancestor's
+     profile, so that is OK). When we change the parent's profile,
+     this alters the uncle's up-profile, so we remove that.  Finally,
+     if the topology has changed, we remove the up-profiles of the
+     nodes.
+
+     NNI() does NOT fix up branch lengths.
+  */
+  int i;
+
+  if (NJ->nSeq <= 3)
+    return;			/* nothing to do */
+
+  /* For each node the upProfile */
+  profile_t **upProfiles = UpProfiles(NJ);
+  
+  traversal_t traversal = InitTraversal(NJ);
+  int node = NJ->root;
+  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
+    if (node < NJ->nSeq || node == NJ->root)
+      continue; /* nothing to do for leaves or root */
+
+    profile_t *profiles[4];
+    int nodeABC[3];
+    SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
+
+    /* Given our 4 profiles, consider doing a swap */
+    int nodeA = nodeABC[0];
+    int nodeB = nodeABC[1];
+    int nodeC = nodeABC[2];
+
+    nni_t choice = ChooseNNI(profiles[0], profiles[1], profiles[2], profiles[3],
+			     NJ->distance_matrix,
+			     NJ->nPos);
+    if(verbose>1 && choice != ABvsCD)
+      fprintf(stderr,"Swap A=%d B=%d C=%d D=out(C) -- choose %s\n",
+	      nodeA, nodeB, nodeC, choice == ACvsBD ? "AC|BD" : "AD|BC");
+
+    if (choice == ACvsBD) {
+      /* swap B and C */
+      ReplaceChild(/*IN/OUT*/NJ, node, nodeB, nodeC);
+      ReplaceChild(/*IN/OUT*/NJ, NJ->parent[node], nodeC, nodeB);
+    } else if (choice == ADvsBC) {
+      /* swap A and C */
+      ReplaceChild(/*IN/OUT*/NJ, node, nodeA, nodeC);
+      ReplaceChild(/*IN/OUT*/NJ, NJ->parent[node], nodeC, nodeA);
+    }
+
+    /* If slow, remove all up-profiles and recompute all profiles
+       up to root */
+    if (slow) {
+      for (i = 0; i < NJ->maxnodes; i++)
+	DeleteUpProfile(upProfiles, NJ, i);
+
+      /* update profiles back to root */
+      int ancestor;
+      for (ancestor = node; ancestor >= 0; ancestor = NJ->parent[ancestor])
+	RecomputeProfile(/*IN/OUT*/NJ, upProfiles, node);
+
+      /* remove all up-profiles made while doing that*/
+      for (i = 0; i < NJ->maxnodes; i++)
+	DeleteUpProfile(upProfiles, NJ, i);
+    } else {
+      RecomputeProfile(/*IN/OUT*/NJ, upProfiles, node);
+      int uncle = Sibling(NJ, NJ->parent[node]);
+      if (uncle >= 0)
+	DeleteUpProfile(upProfiles, NJ, uncle);
+
+      if (choice != ABvsCD) {
+	/* Remove stale up-profiles */
+	DeleteUpProfile(upProfiles, NJ, nodeA);
+	DeleteUpProfile(upProfiles, NJ, nodeB);
+	DeleteUpProfile(upProfiles, NJ, nodeC);
+	DeleteUpProfile(upProfiles, NJ, node);
+      } else {
+	/* No longer needed */
+	DeleteUpProfile(upProfiles, NJ, nodeA);
+	DeleteUpProfile(upProfiles, NJ, nodeB);
+      }
+    } /* end if slow */
+  } /* end postorder traversal */
+  traversal = FreeTraversal(traversal,NJ);
+  if (verbose>1) {
+    int nUp = 0;
+    for (i = 0; i < NJ->maxnodes; i++)
+      if (upProfiles[i] != NULL)
+	nUp++;
+    fprintf(stderr, "N up profiles at end of NNI:  %d\n", nUp);
+  }
+  upProfiles = FreeUpProfiles(upProfiles,NJ);
+}
+
+
+void RecomputeProfile(/*IN/OUT*/NJ_t *NJ, /*IN/OUT*/profile_t **upProfiles, int node) {
+  assert(node >= NJ->nSeq && node != NJ->root);
+  assert(NJ->child[node].nChild==2);
+
+  profile_t *profiles[4];
+  int nodeABC[3];
+  SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
+  double weight = QuartetWeight(profiles[0],profiles[1],profiles[2],profiles[3],
+				NJ->distance_matrix, NJ->nPos);
+  if (verbose>2)
+    fprintf(stderr, "Recompute %d from %d %d weight %.3f\n",
+	    node, NJ->child[node].child[0], NJ->child[node].child[1], weight);
+  NJ->profiles[node] = FreeProfile(NJ->profiles[node], NJ->nPos);
+  NJ->profiles[node] = AverageProfile(profiles[0], profiles[1],
+				      NJ->nPos, NJ->distance_matrix,
+				      weight);
+}
+
+/* The BIONJ-like formula for the weight of A when building a profile for AB is
+     1/2 + (avgD(B,CD) - avgD(A,CD))/(2*d(A,B))
+*/
+double QuartetWeight(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
+		     distance_matrix_t *dmat, int nPos) {
+  if (!bionj)
+    return(-1.0); /* even weighting */
+
+  double dAB, dAC, dAD, dBC, dBD;
+  besthit_t h;
+
+  ProfileDist(pA, pB, nPos, dmat, /*OUT*/&h); dAB = h.dist;
+  if (dAB < 0.01)
+    return -1.0;
+  ProfileDist(pA, pC, nPos, dmat, /*OUT*/&h); dAC = h.dist;
+  ProfileDist(pA, pD, nPos, dmat, /*OUT*/&h); dAD = h.dist;
+
+  ProfileDist(pB, pC, nPos, dmat, /*OUT*/&h); dBC = h.dist;
+  ProfileDist(pB, pD, nPos, dmat, /*OUT*/&h); dBD = h.dist;
+
+  if (logdist) {
+    dAB = LogCorrect(dAB);
+    dAC = LogCorrect(dAC);
+    dAD = LogCorrect(dAD);
+    dBC = LogCorrect(dBC);
+    dBD = LogCorrect(dBD);
+  }
+  double weight = 0.5 + ((dBC+dBD)-(dAC+dAD))/(4*dAB);
+  if (weight < 0)
+    weight = 0;
+  if (weight > 1)
+    weight = 1;
+  return (weight);
+}
+
+/* Resets the children entry of parent and also the parent entry of newchild */
+void ReplaceChild(/*IN/OUT*/NJ_t *NJ, int parent, int oldchild, int newchild) {
+  NJ->parent[newchild] = parent;
+
+  int iChild;
+  for (iChild = 0; iChild < NJ->child[parent].nChild; iChild++) {
+    if (NJ->child[parent].child[iChild] == oldchild) {
+      NJ->child[parent].child[iChild] = newchild;
+      return;
+    }
+  }
+  assert(0);
+}
+
+/* Recomputes all branch lengths
+
+   For internal branches such as (A,B) vs. (C,D), uses the formula 
+
+   length(AB|CD) = (d(A,C)+d(A,D)+d(B,C)+d(B,D))/4 - d(A,B)/2 - d(C,D)/2
+
+   (where all distances are profile distances - diameters).
+
+   For external branches (e.g. to leaves) A vs. (B,C), use the formula
+
+   length(A|BC) = (d(A,B)+d(A,C)-d(B,C))/2
+*/
+void UpdateBranchLengths(/*IN/OUT*/NJ_t *NJ) {
+  if (NJ->nSeq < 2)
+    return;
+  else if (NJ->nSeq == 2) {
+    int root = NJ->root;
+    int nodeA = NJ->child[root].child[0];
+    int nodeB = NJ->child[root].child[1];
+    besthit_t h;
+    ProfileDist(NJ->profiles[nodeA],NJ->profiles[nodeB],
+		NJ->nPos, NJ->distance_matrix, /*OUT*/&h);
+    if (logdist)
+      h.dist = LogCorrect(h.dist);
+    NJ->branchlength[nodeA] = h.dist/2.0;
+    NJ->branchlength[nodeB] = h.dist/2.0;
+    return;
+  }
+
+  profile_t **upProfiles = UpProfiles(NJ);
+  traversal_t traversal = InitTraversal(NJ);
+  int node = NJ->root;
+
+  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
+    /* reset branch length of node (distance to its parent) */
+    if (node == NJ->root)
+      continue; /* no branch length to set */
+    if (node < NJ->nSeq) { /* a leaf */
+      profile_t *profileA = NJ->profiles[node];
+      profile_t *profileB = NULL;
+      profile_t *profileC = NULL;
+
+      int sib = Sibling(NJ,node);
+      if (sib == -1) { /* at root, have 2 siblings */
+	int sibs[2];
+	RootSiblings(NJ, node, /*OUT*/sibs);
+	profileB = NJ->profiles[sibs[0]];
+	profileC = NJ->profiles[sibs[1]];
+      } else {
+	profileB = NJ->profiles[sib];
+	profileC = GetUpProfile(/*IN/OUT*/upProfiles, NJ, NJ->parent[node]);
+      }
+      besthit_t h;
+      double dAB, dAC, dBC;
+      ProfileDist(profileA, profileB, NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dAB = h.dist;
+      ProfileDist(profileA, profileC, NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dAC = h.dist;
+      ProfileDist(profileB, profileC, NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dBC = h.dist;
+      if (logdist) {
+	dAB = LogCorrect(dAB);
+	dAC = LogCorrect(dAC);
+	dBC = LogCorrect(dBC);
+      }
+      NJ->branchlength[node] = (dAB+dAC-dBC)/2.0;
+    } else {
+      profile_t *profiles[4];
+      int nodeABC[3];
+      SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
+
+      besthit_t h;
+      double dAB, dAC, dAD, dBC, dBD, dCD;
+      ProfileDist(profiles[0], profiles[1], NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dAB = h.dist;
+      ProfileDist(profiles[0], profiles[2], NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dAC = h.dist;
+      ProfileDist(profiles[0], profiles[3], NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dAD = h.dist;
+      ProfileDist(profiles[1], profiles[2], NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dBC = h.dist;
+      ProfileDist(profiles[1], profiles[3], NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dBD = h.dist;
+      ProfileDist(profiles[2], profiles[3], NJ->nPos, NJ->distance_matrix, /*OUT*/&h); dCD = h.dist;
+
+      if (logdist) {
+	dAB = LogCorrect(dAB);
+	dAC = LogCorrect(dAC);
+	dAD = LogCorrect(dAD);
+	dBC = LogCorrect(dBC);
+	dBD = LogCorrect(dBD);
+	dCD = LogCorrect(dCD);
+      }
+      NJ->branchlength[node] = (dAC+dAD+dBC+dBD)/4.0 - (dAB+dCD)/2.0;
+      
+      /* no longer needed */
+      DeleteUpProfile(upProfiles, NJ, nodeABC[0]);
+      DeleteUpProfile(upProfiles, NJ, nodeABC[1]);
+    }
+  }
+  traversal = FreeTraversal(traversal,NJ);
+  upProfiles = FreeUpProfiles(upProfiles,NJ);
+}
+
 void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ) {
   /* For each non-root node N, with children A,B, parent P, sibling C, and grandparent G,
      we test the reliability of the split (A,B) versus rest by comparing the profiles
@@ -2255,111 +2768,56 @@ void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ) {
      To save memory, we do depth-first-search down from the root, and we only keep
      up-profiles for nodes in the active path.
   */
-  int iChild;
   int i;
 
-  if (NJ->nSeq <= 3)
+  if (NJ->nSeq <= 3 || nBootstrap <= 0)
     return;			/* nothing to do */
 
-  int *path = (int*)mymalloc(sizeof(int)*NJ->maxnodes);
-  int path_size = 0;
-  int *work = (int*)mymalloc(sizeof(int)*NJ->maxnodes);
-  int work_size = 0;
-
-  /* For each node the upProfile, but we keep these as NULL for non-active nodes */
-  profile_t **upProfiles = (profile_t**)mymalloc(sizeof(profile_t*)*NJ->maxnodes);
-  for (i=0; i<NJ->maxnodes; i++) upProfiles[i] = NULL;
-
-  /* Start with children of root, and with path as just the root */
-  for (iChild = 0; iChild < NJ->child[NJ->root].nChild; iChild++) {
-    work[work_size++] = NJ->child[NJ->root].child[iChild];
-    if(verbose>10) fprintf(stderr,"Add to work %d\n",work[work_size-1]);
+  /* Pick columns for resampling, stored as col[iBoot*nPos + j] */
+  int *col = (int*)mymalloc(sizeof(int)*NJ->nPos*nBootstrap);
+  for (i = 0; i < nBootstrap; i++) {
+    int j;
+    for (j = 0; j < NJ->nPos; j++) {
+      int pos   = (int)(knuth_rand() * NJ->nPos);
+      if (pos<0)
+	pos = 0;
+      else if (pos == NJ->nPos)
+	pos = NJ->nPos-1;
+      col[i*NJ->nPos + j] = pos;
+    }
   }
-  path[path_size++] = NJ->root;
-  if(verbose>10) fprintf(stderr,"Add to path %d\n",path[path_size-1]);
-
-  while(work_size>0) {
-    int node = work[--work_size];
-    int parent = NJ->parent[node];
-    int child1,child2;
-
-    if (node < NJ->nSeq) {
-      if(verbose>10) fprintf(stderr,"Skipping leaf %d\n", node);
-      continue;			/* for leaves, nothing to do */
-    }
-
-    /* last position in path should be parent */
-    while(path[path_size-1] != NJ->parent[node]) {
-      /* Forget profile of parent */
-      int old = path[--path_size];
-      upProfiles[old] = FreeProfile(upProfiles[old], NJ->nPos);
-      if(verbose>10) fprintf(stderr,"Free upprofile %d\n",old);
-      assert(path_size >= 1);
-    }
-
-    /* record child1,child2 -- these give 2 of our 4 profiles */
-    assert(NJ->child[node].nChild==2);
-    child1 = NJ->child[node].child[0];
-    child2 = NJ->child[node].child[1];
-
-    assert(upProfiles[node] == NULL);
-
-    /* get the other 2 profiles */
-    profile_t *outprofiles[2];
-    if (parent == NJ->root) {
-      int nSibs = 0;
-      int sibs[3];
-      for(iChild=0;iChild<NJ->child[NJ->root].nChild;iChild++) {
-	int child = NJ->child[NJ->root].child[iChild];
-	if (child != node) sibs[nSibs++] = child;
+  if (verbose > 5) {
+    for (i=0; i < 3 && i < nBootstrap; i++) {
+      fprintf(stderr,"Boot%d",i);
+      int j;
+      for (j = 0; j < NJ->nPos; j++) {
+	fprintf(stderr,"\t%d",col[i*NJ->nPos+j]);
       }
-      assert(nSibs==2);
-      outprofiles[0] = NJ->profiles[sibs[0]];
-      outprofiles[1] = NJ->profiles[sibs[1]];
-      if(verbose>10) fprintf(stderr,"outprofiles for node %d -- %d %d (2 sibs)\n",node,sibs[0],sibs[1]);
-    } else {
-      int sibling = Sibling(NJ,node);
-      assert(sibling>=0);
-      assert(upProfiles[parent] != NULL);
-      outprofiles[0] = upProfiles[parent];
-      outprofiles[1] = NJ->profiles[sibling];
-      if(verbose>10) fprintf(stderr,"outprofiles for node %d -- %d %d (parent & sibling)\n",node,parent,sibling);
+      fprintf(stderr,"\n");
     }
-
-    /* Given our 4 profiles, compute support values and save
-       average of the outprofiles in upProfiles
-    */
-    if(verbose>2) fprintf(stderr,"SplitSupport for %d\n",node);
-    NJ->support[node] = SplitSupport(NJ->profiles[child1],
-				     NJ->profiles[child2],
-				     outprofiles[0],
-				     outprofiles[1],
-				     NJ->distance_matrix,
-				     NJ->nPos);
-    upProfiles[node] = AverageProfile(outprofiles[0], outprofiles[1], NJ->nPos,
-				      NJ->distance_matrix,
-				      /*no-weight*/-1.0);
-
-    if(verbose>10) fprintf(stderr, "Set upprofile %d\n", node);
-
-    /* Add children to work and add self to path */
-    for(iChild=0;iChild<NJ->child[node].nChild;iChild++) {
-      work[work_size++] = NJ->child[node].child[iChild];
-      if(verbose>10) fprintf(stderr, "Add to work %d\n", work[work_size-1]);
-    }
-    path[path_size++] = node;
-    if(verbose>10) fprintf(stderr, "Add to path %d\n", path[path_size-1]);
   }
 
-  while(path_size>0) {
-    int node = path[--path_size];
-    upProfiles[node] = FreeProfile(upProfiles[node],NJ->nPos);
-    if(verbose>10) fprintf(stderr, "Free upprofile %d (cleaning up path)\n", node);
+  profile_t **upProfiles = UpProfiles(NJ);
+  traversal_t traversal = InitTraversal(NJ);
+  int node = NJ->root;
+  while((node = TraversePostorder(node, NJ, /*IN/OUT*/traversal)) >= 0) {
+    if (node < NJ->nSeq || node == NJ->root)
+      continue; /* nothing to do for leaves or root */
+
+    profile_t *profiles[4];
+    int nodeABC[3];
+    SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
+
+    NJ->support[node] = SplitSupport(profiles[0], profiles[1], profiles[2], profiles[3],
+				     NJ->distance_matrix, NJ->nPos, col);
+
+    /* no longer needed */
+    DeleteUpProfile(upProfiles, NJ, nodeABC[0]);
+    DeleteUpProfile(upProfiles, NJ, nodeABC[1]);
   }
-  for(i=0;i<NJ->maxnodes;i++) assert(upProfiles[i]==NULL);
-  upProfiles = myfree(upProfiles, sizeof(profile_t*)*NJ->maxnodes);
-  path = myfree(path, sizeof(int)*NJ->maxnodes);
-  work = myfree(work, sizeof(int)*NJ->maxnodes);
+  traversal = FreeTraversal(traversal,NJ);
+  upProfiles = FreeUpProfiles(upProfiles,NJ);
+  col = myfree(col, sizeof(int)*NJ->nPos+nBootstrap);
 }
 
 profile_t *NewProfile(int nPos) {
@@ -2381,10 +2839,40 @@ profile_t *FreeProfile(profile_t *profile, int nPos) {
     return(myfree(profile, sizeof(profile_t)));
 }
 
+void SetupABCD(NJ_t *NJ, int node,
+	       /* the 4 profiles; the last one is an outprofile */
+	       /*OUT*/profile_t *profiles[4], 
+	       /*IN/OUT*/profile_t **upProfiles,
+	       /*OUT*/int nodeABC[3]) {
+  int parent = NJ->parent[node];
+  assert(parent >= 0);
+  assert(NJ->child[node].nChild == 2);
+  nodeABC[0] = NJ->child[node].child[0]; /*A*/
+  nodeABC[1] = NJ->child[node].child[1]; /*B*/
+
+  profile_t *profile4 = NULL;
+  if (parent == NJ->root) {
+    int sibs[2];
+    RootSiblings(NJ, node, /*OUT*/sibs);
+    nodeABC[2] = sibs[0];
+    profile4 = NJ->profiles[sibs[1]];
+  } else {
+    nodeABC[2] = Sibling(NJ,node);
+    assert(nodeABC[2] >= 0);
+    profile4 = GetUpProfile(upProfiles,NJ,parent);
+  }
+  int i;
+  for (i = 0; i < 3; i++)
+    profiles[i] = NJ->profiles[nodeABC[i]];
+  profiles[3] = profile4;
+}
+
+
 int Sibling(NJ_t *NJ, int node) {
   int parent = NJ->parent[node];
+  if (parent < 0 || parent == NJ->root)
+    return(-1);
   int iChild;
-  if(parent==NJ->root) return(-1);
   for(iChild=0;iChild<NJ->child[parent].nChild;iChild++) {
     if(NJ->child[parent].child[iChild] != node)
       return (NJ->child[parent].child[iChild]);
@@ -2393,39 +2881,34 @@ int Sibling(NJ_t *NJ, int node) {
   return(-1);
 }
 
+void RootSiblings(NJ_t *NJ, int node, /*OUT*/int sibs[2]) {
+  assert(NJ->parent[node] == NJ->root);
+  assert(NJ->child[NJ->root].nChild == 3);
+
+  int nSibs = 0;
+  int iChild;
+  for(iChild=0; iChild < NJ->child[NJ->root].nChild; iChild++) {
+    int child = NJ->child[NJ->root].child[iChild];
+    if (child != node) sibs[nSibs++] = child;
+  }
+  assert(nSibs==2);
+}
+
 /* Computes support for (A,B),(C,D) compared to that for (A,C),(B,D) and (A,D),(B,C) */
 double SplitSupport(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
 		    /*OPTIONAL*/distance_matrix_t *dmat,
-		    int nPos) {
-  /* Support1 = Support(AB|CD over AC|BD) = d(A,C)+d(B,D)-d(A,B)-d(C,D)
-     We keep track of sum, sumsq, and total weight
-     Note sums are weighted by weight
+		    int nPos,
+		    int *col) {
+  int i,j;
 
-     Support2 = Support(AB|CD over AD|BC) = d(A,D)+d(B,C)-d(A,B)-d(C,D)
-
-     m1 is mean(Support1) and s1 is standard deviation of Support1
-     cor12 is the correlation between Support1 and Support2
-  */
-  int i;
-  double support1sum, support1sumsq, m1, s1;
-  double support2sum, support2sumsq, m2, s2;
-  double support12sum, cor12;
-  double meanMin, sdMin, actualMin, actualZ, support;
-  /* If we are doing local bootstrap */
-  double *support1 = NULL;
-  double *support2 = NULL;
-  if (nBootstrap > 0) {
-    support1 = (double*)mymalloc(sizeof(double)*nPos);
-    support2 = (double*)mymalloc(sizeof(double)*nPos);
+  /* Note distpieces are weighted */
+  const int AB=0, AC=1, AD=2, BC=3, BD=4, CD=5;
+  double *distpieces[6];
+  double *weights[6];
+  for (j = 0; j < 6; j++) {
+    distpieces[j] = (double*)mymalloc(sizeof(double)*nPos);
+    weights[j] = (double*)mymalloc(sizeof(double)*nPos);
   }
-
-  double total_weight = 0;
-  double total_weight_sq = 0;
-  support1sum = 0;
-  support2sum = 0;
-  support1sumsq = 0;
-  support2sumsq = 0;
-  support12sum = 0;
 
   int iFreqA = 0;
   int iFreqB = 0;
@@ -2436,130 +2919,83 @@ double SplitSupport(profile_t *pA, profile_t *pB, profile_t *pC, profile_t *pD,
     float *fB = GET_FREQ(pB, i, /*IN/OUT*/iFreqB);
     float *fC = GET_FREQ(pC, i, /*IN/OUT*/iFreqC);
     float *fD = GET_FREQ(pD, i, /*IN/OUT*/iFreqD);
-    double support1piece = 0;
-    double support2piece = 0;
 
-    double weight = pA->weights[i];
-    if(pB->weights[i] < weight) weight = pB->weights[i];
-    if(pC->weights[i] < weight) weight = pC->weights[i];
-    if(pD->weights[i] < weight) weight = pD->weights[i];
+    weights[AB][i] = pA->weights[i] * pB->weights[i];
+    weights[AC][i] = pA->weights[i] * pC->weights[i];
+    weights[AD][i] = pA->weights[i] * pD->weights[i];
+    weights[BC][i] = pB->weights[i] * pC->weights[i];
+    weights[BD][i] = pB->weights[i] * pD->weights[i];
+    weights[CD][i] = pC->weights[i] * pD->weights[i];
 
-    if (weight > 0) {
-      /* Use the minimum of all the weights. (Should I be using the product instead?) */
-      total_weight += weight;
-      total_weight_sq += weight*weight;
-
-      double pieceAB = ProfileDistPiece(pA->codes[i], pB->codes[i], fA, fB, dmat, NULL);
-      double pieceAC = ProfileDistPiece(pA->codes[i], pC->codes[i], fA, fC, dmat, NULL);
-      double pieceAD = ProfileDistPiece(pA->codes[i], pD->codes[i], fA, fD, dmat, NULL);
-      double pieceBC = ProfileDistPiece(pB->codes[i], pC->codes[i], fB, fC, dmat, NULL);
-      double pieceBD = ProfileDistPiece(pB->codes[i], pD->codes[i], fB, fD, dmat, NULL);
-      double pieceCD = ProfileDistPiece(pC->codes[i], pD->codes[i], fC, fD, dmat, NULL);
-
-      support1piece = pieceAC+pieceBD-pieceAB-pieceCD;
-      support1sum += weight*support1piece;
-      support1sumsq += weight*support1piece*support1piece;
-
-      support2piece = pieceAD+pieceBC-pieceAB-pieceCD;
-      support2sum += weight*support2piece;
-      support2sumsq += weight*support2piece*support2piece;
-
-      support12sum += weight*support1piece*support2piece;
-    }
-    if (nBootstrap>0) {
-      support1[i] = support1piece;
-      support2[i] = support2piece;
-    }
-    if(verbose>11) fprintf(stderr, "Pos%d weight %f support1piece %f support2piece %f\n",
-			   i, weight, support1piece, support2piece);
+    distpieces[AB][i] = weights[AB][i] * ProfileDistPiece(pA->codes[i], pB->codes[i], fA, fB, dmat, NULL);
+    distpieces[AC][i] = weights[AC][i] * ProfileDistPiece(pA->codes[i], pC->codes[i], fA, fC, dmat, NULL);
+    distpieces[AD][i] = weights[AD][i] * ProfileDistPiece(pA->codes[i], pD->codes[i], fA, fD, dmat, NULL);
+    distpieces[BC][i] = weights[BC][i] * ProfileDistPiece(pB->codes[i], pC->codes[i], fB, fC, dmat, NULL);
+    distpieces[BD][i] = weights[BD][i] * ProfileDistPiece(pB->codes[i], pD->codes[i], fB, fD, dmat, NULL);
+    distpieces[CD][i] = weights[CD][i] * ProfileDistPiece(pC->codes[i], pD->codes[i], fC, fD, dmat, NULL);
   }
   assert(iFreqA == pA->nVectors);
   assert(iFreqB == pB->nVectors);
   assert(iFreqC == pC->nVectors);
   assert(iFreqD == pD->nVectors);
 
-  if (support1sum < 0 || support2sum < 0)
-    nSuboptimalSplits++;	/* Another split seems superior */
-  if (total_weight < 2.0) return(0);
-
-  if (nBootstrap > 0) {
-    int nSupport = 0;
-    int iBoot;
-    for (iBoot=0;iBoot<nBootstrap;iBoot++) {
-      double s1 = 0;
-      double s2 = 0;
-      for (i=0;i<nPos;i++) {
-	int pos = (int)(knuth_rand() * nPos);
-	if(pos<0) pos=0;
-	if(pos==nPos) pos=nPos-1;
-	s1 += support1[pos];
-	s2 += support2[pos];
-      }
-      if (s1>0 && s2>0) nSupport++;
+  double totpieces[6];
+  double totweights[6];
+  double dists[6];
+  for (j = 0; j < 6; j++) {
+    totpieces[j] = 0.0;
+    totweights[j] = 0.0;
+    for (i = 0; i < nPos; i++) {
+      totpieces[j] += distpieces[j][i];
+      totweights[j] += weights[j][i];
     }
-    support1 = myfree(support1,nPos*sizeof(double));
-    support2 = myfree(support2,nPos*sizeof(double));
-    return( nSupport/(double)nBootstrap );
-  } else {
-    /* mean((X-mean(X))**2) = mean(X*X) - mean(X)**2 
-       var(X) = sqrt(N/(N-1)) * sqrt(mean((X-meanX)**2))
-       covar(X,Y) = mean(XY) - mean(X)*mean(Y)
-    */
-    m1 = support1sum/total_weight;
-    s1 = sqrt(support1sumsq/total_weight - m1*m1);
-    if(s1 < 0.001) s1=0.001;
-    
-    m2 = support2sum/total_weight;
-    s2 = sqrt(support2sumsq/total_weight - m2*m2);
-    if(s2 < 0.001) s2=0.001;
-    
-    cor12 = (support12sum/total_weight - m1*m2)/(s1*s2);
-    /* cor12 might be out of bounds if s1 or s2 was very small */
-    if (cor12 > 0.999) cor12 = 0.999;
-    if (cor12 < -0.999) cor12 = -0.999;
-    
-    /* An unbiased estimator of the variance of n variables is normally mean squared deviance / (sample_size-1)
-       That can be derived from the following:
-       Given independent standard normal variables xi, then
-       SumSquaredDeviance(xi) = sum(square(x-mean(x))) = sum(square(x)) - square(sum(x))/n
-       E(s.s.d.) = n*E(square(x)) - E(square(sum(x)))/n = n -  Var(sum(x))/n = n - n/n = n-1
-       
-       Similarly, if we have weighted observations with weights wi so that sum(wi) = 1, then
-       MeanSquaredDeviance(xi) = sum(wi*square(xi-sum(wj*xj))) = sum(wi*square(xi)) - square(sum(wi*xi))
-       E(m.s.d.) = sum(wi*E(square(xi))) - Var(sum(wi*xi)) = sum(wi) - sum(square(wi)) = 1 - sum(square(wi)) <= (n-1)/n
-       
-       If variables have a variance other than one then we can write
-       E(m.s.d) = Var(xi) * (1 - sum(square(wi)))
-       
-       But we really want the variance of the mean, so we need another factor of total_weight_sq, as
-       Var(mean) = Var(sum(wi*xi)) = sum(wi**2) * Var(xi) = sum(wi**2) * m.s.d. / (1 - sum(square(wi)))
-    */
-    total_weight_sq /= total_weight * total_weight; /* for summing to 1 */
-    s1 *= sqrt(total_weight_sq/(1-total_weight_sq)); /* factor = 1/(n-1) if all weights are equal */
-    s2 *= sqrt(total_weight_sq/(1-total_weight_sq));
-    
-    if(verbose>2) fprintf(stderr,"Mean1 %f SD1 %f Mean2 %f SD2 %f cor %f\n", m1, s1, m2, s2, cor12);
-    
-    /* The mean and variance of the minimum of two normal variables is given by
-       Offer Kella (1986) Commun. Statistc.-Theory Meth. 15:3265-3276
-    */
-    meanMin = -sqrt((s1*s1 + s2*s2 - 2*cor12*s1*s2)/(2*M_PI));
-    sdMin = sqrt((s1*s1 + s2*s2)*(1-1/M_PI)*0.5 + s1*s2*cor12/M_PI);
-    actualMin = m1 < m2 ? m1 : m2;
-    actualZ = sdMin > 0 ? (actualMin-meanMin)/sdMin : 0; /* higher is better */
-    
-    /* P(z > observed | selected this join)  
-       = P(z > observed | P > 0)
-       = 3 * P(z > observed) by symmetry
-    */
-    support = 1 - 3 * pnorm(-actualZ); /* Use -actualZ to get P(z >= actualZ) */
-    if(support<0) support=0;
-    
-    if(verbose>2) fprintf(stderr,"MeanMin %f SDMin %f actualMin %f actualZ %f support %f\n",
-			  meanMin,sdMin,actualMin,actualZ,support);
-    return(support);
+    dists[j] = totweights[j] > 0.01 ? totpieces[j]/totweights[j] : 3.0;
+    if (logdist)
+      dists[j] = LogCorrect(dists[j]);
   }
-  assert(0);
+
+  /* Support1 = Support(AB|CD over AC|BD) = d(A,C)+d(B,D)-d(A,B)-d(C,D)
+     Support2 = Support(AB|CD over AD|BC) = d(A,D)+d(B,C)-d(A,B)-d(C,D)
+  */
+  double support1 = dists[AC] + dists[BD] - dists[AB] - dists[CD];
+  double support2 = dists[AD] + dists[BC] - dists[AB] - dists[CD];
+
+  if (support1 < 0 || support2 < 0) {
+    nSuboptimalSplits++;	/* Another split seems superior */
+  }
+
+  assert(nBootstrap > 0);
+  int nSupport = 0;
+
+  int iBoot;
+  for (iBoot=0;iBoot<nBootstrap;iBoot++) {
+    int *colw = &col[nPos*iBoot];
+
+    for (j = 0; j < 6; j++) {
+      double totp = 0;
+      double totw = 0;
+      double *d = distpieces[j];
+      double *w = weights[j];
+      for (i=0; i<nPos; i++) {
+	int c = colw[i];
+	totp += d[c];
+	totw += w[c];
+      }
+      dists[j] = totp > 0.01 ? totp/totw : 3.0;
+      if (logdist)
+	dists[j] = LogCorrect(dists[j]);
+    }
+    support1 = dists[AC] + dists[BD] - dists[AB] - dists[CD];
+    support2 = dists[AD] + dists[BC] - dists[AB] - dists[CD];
+    if (support1 > 0 && support2 > 0)
+      nSupport++;
+  } /* end loop over bootstrap replicates */
+
+  for (j = 0; j < 6; j++) {
+    distpieces[j] = myfree(distpieces[j], sizeof(double)*nPos);
+    weights[j] = myfree(weights[j], sizeof(double)*nPos);
+  }
+  return( nSupport/(double)nBootstrap );
 }
 
 void SetDistCriterion(/*IN/OUT*/NJ_t *NJ, int nActive, /*IN/OUT*/besthit_t *hit) {
@@ -2626,11 +3062,13 @@ void SetOutDistance(NJ_t *NJ, int iNode, int nActive) {
      with another correction of nActive because the weight of the out-profile is the average
      weight not the total weight.
   */
-  double pdistOutWithoutA = (nActive-1)
-    * (dist.dist * dist.weight * nActive - NJ->selfweight[iNode] * NJ->selfdist[iNode])
-    / (dist.weight * nActive - NJ->selfweight[iNode]);
-  NJ->outDistances[iNode] =  pdistOutWithoutA
-    - NJ->diameter[iNode] * (nActive-1) - (NJ->totdiam - NJ->diameter[iNode]);
+  double top = (nActive-1)
+    * (dist.dist * dist.weight * nActive - NJ->selfweight[iNode] * NJ->selfdist[iNode]);
+  double bottom = (dist.weight * nActive - NJ->selfweight[iNode]);
+  double pdistOutWithoutA = top/bottom;
+  NJ->outDistances[iNode] =  bottom > 0.01 ? 
+    pdistOutWithoutA - NJ->diameter[iNode] * (nActive-1) - (NJ->totdiam - NJ->diameter[iNode])
+    : 3.0;
   NJ->nOutDistActive[iNode] = nActive;
 
   if(verbose>3 && iNode < 5)
@@ -3368,7 +3806,7 @@ hashstrings_t *MakeHashtable(char **strings, int nStrings) {
   return(hash);
 }
 
-hashstrings_t *DeleteHashtable(hashstrings_t* hash) {
+hashstrings_t *FreeHashtable(hashstrings_t* hash) {
   if (hash != NULL) {
     myfree(hash->buckets, sizeof(hashbucket_t) * hash->nBuckets);
     myfree(hash, sizeof(hashstrings_t));
@@ -3408,6 +3846,122 @@ int HashCount(hashstrings_t *hash, hashiterator_t hi) {
 
 int HashFirst(hashstrings_t *hash, hashiterator_t hi) {
   return(hash->buckets[hi].first);
+}
+
+
+traversal_t InitTraversal(NJ_t *NJ) {
+  traversal_t worked = (bool*)mymalloc(sizeof(bool)*NJ->maxnodes);
+  int i;
+  for (i=0; i<NJ->maxnodes; i++)
+    worked[i] = false;
+  return(worked);
+}
+
+int TraversePostorder(int node, NJ_t *NJ, /*IN/OUT*/traversal_t traversal) {
+  while(1) {
+    assert(node >= 0);
+
+    /* move to a child if possible */
+    bool found = false;
+    int iChild;
+    for (iChild=0; iChild < NJ->child[node].nChild; iChild++) {
+      int child = NJ->child[node].child[iChild];
+      if (!traversal[child]) {
+	node = child;
+	found = true;
+	break;
+      }
+    }
+    if (found)
+      continue; /* keep moving down */
+    if (!traversal[node]) {
+      traversal[node] = true;
+      return(node);
+    }
+    /* If we've already done this node, need to move up */
+    if (node == NJ->root)
+      return(-1); /* nowhere to go -- done traversing */
+    node = NJ->parent[node];
+  }
+}
+
+traversal_t FreeTraversal(traversal_t traversal, NJ_t *NJ) {
+  myfree(traversal, sizeof(bool)*NJ->maxnodes);
+  return(NULL);
+}
+
+profile_t **UpProfiles(NJ_t *NJ) {
+  profile_t **upProfiles = (profile_t**)mymalloc(sizeof(profile_t*)*NJ->maxnodes);
+  int i;
+  for (i=0; i<NJ->maxnodes; i++) upProfiles[i] = NULL;
+  return(upProfiles);
+}
+
+profile_t *GetUpProfile(/*IN/OUT*/profile_t **upProfiles, NJ_t *NJ, int outnode) {
+  assert(outnode != NJ->root && outnode >= NJ->nSeq); /* not for root or leaves */
+  if (upProfiles[outnode] != NULL)
+    return(upProfiles[outnode]);
+
+  int depth;
+  int *pathToRoot = PathToRoot(NJ, outnode, /*OUT*/&depth);
+  int i;
+  /* depth-1 is root */
+  for (i = depth-2; i>=0; i--) {
+    int node = pathToRoot[i];
+
+    if (upProfiles[node] == NULL) {
+      /* Note -- SetupABCD may call GetUpProfile, but it should do it farther
+	 up in the path to the root
+      */
+      profile_t *profiles[4];
+      int nodeABC[3];
+      SetupABCD(NJ, node, /*OUT*/profiles, /*IN/OUT*/upProfiles, /*OUT*/nodeABC);
+      double weight = QuartetWeight(profiles[2], profiles[3], profiles[0], profiles[1],
+				    NJ->distance_matrix, NJ->nPos);
+      if (verbose>2)
+	fprintf(stderr, "Compute upprofile of %d from %d and parents (vs. children %d %d) with weight %.3f\n",
+		node, nodeABC[2], nodeABC[0], nodeABC[1], weight);
+      upProfiles[node] = AverageProfile(profiles[2], profiles[3], NJ->nPos,
+					NJ->distance_matrix,
+					weight);
+    }
+  }
+  FreePath(pathToRoot,NJ);
+  assert(upProfiles[outnode] != NULL);
+  return(upProfiles[outnode]);
+}
+
+profile_t *DeleteUpProfile(/*IN/OUT*/profile_t **upProfiles, NJ_t *NJ, int node) {
+  assert(node>=0 && node < NJ->maxnodes);
+  if (upProfiles[node] != NULL)
+    upProfiles[node] = FreeProfile(upProfiles[node], NJ->nPos); /* returns NULL */
+  return(NULL);
+}
+
+profile_t **FreeUpProfiles(profile_t **upProfiles, NJ_t *NJ) {
+  int i;
+  for (i=0; i < NJ->maxnodes; i++)
+    DeleteUpProfile(upProfiles, NJ, i);
+  myfree(upProfiles, sizeof(profile_t*)*NJ->maxnodes);
+  return(NULL);
+}
+
+int *PathToRoot(NJ_t *NJ, int node, /*OUT*/int *outDepth) {
+  int *pathToRoot = (int*)mymalloc(sizeof(int)*NJ->maxnodes);
+  int depth = 0;
+  int ancestor = node;
+  while(ancestor >= 0) {
+    pathToRoot[depth] = ancestor;
+    ancestor = NJ->parent[ancestor];
+    depth++;
+  }
+  *outDepth = depth;
+  return(pathToRoot);
+}
+
+int *FreePath(int *path, NJ_t *NJ) {
+  myfree(path, sizeof(int)*NJ->maxnodes);
+  return(NULL);
 }
 
 
