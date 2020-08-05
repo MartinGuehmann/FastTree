@@ -1,6 +1,6 @@
 /*
  * FastTree -- neighbor joining for multiple sequence alignments using profiles
- * Morgan N. Price, January-March 2008
+ * Morgan N. Price, January-April 2008
  *
  *  Copyright (C) 2008 The Regents of the University of California
  *  All rights reserved.
@@ -213,7 +213,7 @@
 #include <ctype.h>
 #include <malloc.h>
 
-char *usage = "Usage for FastTree 0.9:\n"
+char *usage = "Usage for FastTree 0.9.1:\n"
               "FastTree [-quiet] [-boot 1000] [-slow | -fastest]\n"
               "          [-top | -notop]\n"
               "          [-topm 1.0 [-close 0.75] [-refresh 0.8]]\n"
@@ -306,6 +306,9 @@ typedef struct {
    Note that variance = dist because in BIONJ, constant factors of variance do not matter,
    and because we weight ungapped sequences higher naturally when averaging profiles,
    so we do not take this into account in the computation of "lambda" for BIONJ.
+
+   For the top-hit list heuristic, if the top hit list becomes "too short",
+   we store invalid entries with i=j=-1 and dist/criterion very high.
 */
 typedef struct {
   int i, j;
@@ -546,6 +549,7 @@ void TopHitJoin(/*IN/UPDATE*/NJ_t *NJ, int newnode, int nActive, int m,
    which is returned.
    Does not update criterion or out-distances
    Ignores (silently removes) hit to self
+   Pads the list with invalid entries so that it is always of length nOut
 */
 besthit_t *SortSaveBestHits(/*IN/UPDATE*/besthit_t *besthits, int iNode, int nIn, int nOut);
 
@@ -1667,6 +1671,7 @@ profile_t *SeqToProfile(NJ_t *NJ, char *seq, int nPos, int iNode) {
     }
     for (i = 0; codesString[i]; i++) {
       charToCode[codesString[i]] = i;
+      charToCode[tolower(codesString[i])] = i;
     }
     charToCode['-'] = NOCODE;
     codeSet=1;
@@ -3132,15 +3137,22 @@ void TransferBestHits(/*IN/OUT*/NJ_t *NJ,
   for(iBest = 0; iBest < nOldHits; iBest++) {
     int j = oldhits[iBest].j;
     besthit_t *new = &newhits[iBest];
-
-    /* Move up to an active node */
-    while(NJ->parent[j] >= 0)
-      j = NJ->parent[j];
-
-    new->i = iNode;
-    new->j = j;
-    if (updateDistances)
-      SetDistCriterion(NJ, nActive, /*IN/OUT*/new);
+    if(j<0) {			/* empty (invalid) entry */
+      new->i = iNode;
+      new->j = -1;
+      new->weight = 0;
+      new->dist = 1e20;
+      new->criterion = 1e20;
+    } else {
+      /* Move up to an active node */
+      while(NJ->parent[j] >= 0)
+	j = NJ->parent[j];
+      
+      new->i = iNode;
+      new->j = j;
+      if (updateDistances)
+	SetDistCriterion(NJ, nActive, /*IN/OUT*/new);
+    }
   }
 }
 
