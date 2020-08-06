@@ -1963,7 +1963,7 @@ int main(int argc, char **argv) {
     fps[nFPs++] = fpLog;
   
   if (!make_matrix) {		/* Report settings */
-    char tophitString[100] = "no";
+    char tophitString[150] = "no";
     char tophitsCloseStr[100] = "default";
     if(tophitsClose > 0) sprintf(tophitsCloseStr,"%.2f",tophitsClose);
     if(tophitsMult>0) sprintf(tophitString,"%.2f*sqrtN close=%s refresh=%.2f",
