@@ -24,4 +24,4 @@ FastTreeDbl FastTreeDblMP: CFLAGS += -DUSE_DOUBLE
 FastTreeMP  FastTreeDblMP: CFLAGS += -DOPENMP -fopenmp
 
 FastTree.c:
-	curl -fsSL http://www.microbesonline.org/fasttree/$@ -o $@
+#	curl -fsSL http://www.microbesonline.org/fasttree/$@ -o $@
