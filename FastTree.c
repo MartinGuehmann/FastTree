@@ -1681,6 +1681,38 @@ int main(int argc, char **argv) {
   bool bQuote = false;
   FILE *fpOut = stdout;
 
+#ifdef MEM_SIZE_TEST
+  fprintf(stderr,"Size of numeric_t: %lu\n", sizeof(numeric_t));
+  fprintf(stderr,"Size of alignment_t: %lu\n", sizeof(alignment_t));
+  fprintf(stderr,"Size of profile_t: %lu\n", sizeof(profile_t));
+  fprintf(stderr,"Size of besthit_t: %lu\n", sizeof(besthit_t));
+  fprintf(stderr,"Size of children_t: %lu\n", sizeof(children_t));
+  fprintf(stderr,"Size of distance_matrix_t: %lu\n", sizeof(distance_matrix_t));
+  fprintf(stderr,"Size of transition_matrix_t: %lu\n", sizeof(transition_matrix_t));
+  fprintf(stderr,"Size of rates_t: %lu\n", sizeof(rates_t));
+  fprintf(stderr,"Size of NJ_t: %lu\n", sizeof(NJ_t));
+  fprintf(stderr,"Size of uniquify_t: %lu\n", sizeof(uniquify_t));
+  fprintf(stderr,"Size of spr_step_t: %lu\n", sizeof(spr_step_t));
+  fprintf(stderr,"Size of hit_t: %lu\n", sizeof(hit_t));
+  fprintf(stderr,"Size of top_hits_list_t: %lu\n", sizeof(top_hits_list_t));
+  fprintf(stderr,"Size of top_hits_t: %lu\n", sizeof(top_hits_t));
+  fprintf(stderr,"Size of nni_stats_t: %lu\n", sizeof(nni_stats_t));
+  fprintf(stderr,"Size of SplitCount_t: %lu\n", sizeof(SplitCount_t));
+  fprintf(stderr,"Size of quartet_pair_t: %lu\n", sizeof(quartet_pair_t));
+  fprintf(stderr,"Size of siteratelk_t: %lu\n", sizeof(siteratelk_t));
+  fprintf(stderr,"Size of quartet_length_t: %lu\n", sizeof(quartet_length_t));
+  fprintf(stderr,"Size of quartet_opt_t: %lu\n", sizeof(quartet_opt_t));
+  fprintf(stderr,"Size of gtr_opt_t: %lu\n", sizeof(gtr_opt_t));
+  fprintf(stderr,"Size of hashbucket_t: %lu\n", sizeof(hashbucket_t));
+  fprintf(stderr,"Size of hashiterator_t: %lu\n", sizeof(hashiterator_t));
+  fprintf(stderr,"Size of traversal_t: %lu\n", sizeof(traversal_t));
+  fprintf(stderr,"Size of int: %lu\n", sizeof(int));
+  fprintf(stderr,"Size of float: %lu\n", sizeof(float));
+  fprintf(stderr,"Size of double: %lu\n", sizeof(double));
+  fprintf(stderr,"Size of void*: %lu\n", sizeof(void*));
+  exit(0);
+#endif
+
   if (isatty(STDIN_FILENO) && argc == 1) {
     fprintf(stderr,"Usage for FastTree version %s %s%s:\n%s",
 	    FT_VERSION, SSE_STRING, OpenMPString(), usage);

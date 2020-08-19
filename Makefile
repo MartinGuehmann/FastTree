@@ -17,11 +17,12 @@ install:
 clean:
 	rm -fv FastTree{,Dbl{,MP},MP}
 
-FastTree FastTreeDbl FastTreeMP FastTreeDblMP: FastTree.c
+FastTree FastTreeDbl FastTreeMP FastTreeDblMP MemSizeTest: FastTree.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 FastTreeDbl FastTreeDblMP: CFLAGS += -DUSE_DOUBLE
 FastTreeMP  FastTreeDblMP: CFLAGS += -DOPENMP -fopenmp
+MemSizeTest: CFLAGS += -DMEM_SIZE_TEST
 
 FastTree.c:
 #	curl -fsSL http://www.microbesonline.org/fasttree/$@ -o $@
