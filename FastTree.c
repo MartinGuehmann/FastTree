@@ -1704,6 +1704,7 @@ int main(int argc, char **argv) {
   fprintf(stderr,"Size of quartet_opt_t: %lu\n", sizeof(quartet_opt_t));
   fprintf(stderr,"Size of gtr_opt_t: %lu\n", sizeof(gtr_opt_t));
   fprintf(stderr,"Size of hashbucket_t: %lu\n", sizeof(hashbucket_t));
+  fprintf(stderr,"Size of hashstrings_t: %lu\n", sizeof(hashstrings_t));
   fprintf(stderr,"Size of hashiterator_t: %lu\n", sizeof(hashiterator_t));
   fprintf(stderr,"Size of traversal_t: %lu\n", sizeof(traversal_t));
   fprintf(stderr,"Size of int: %lu\n", sizeof(int));
