@@ -574,9 +574,9 @@ typedef struct {
   /* alignment profile */
   numeric_t *weights;
   unsigned char *codes;
-  numeric_t *vectors;		/* NULL if no non-constant positions, e.g. for leaves */
+  numeric_t *vectors;       /* NULL if no non-constant positions, e.g. for leaves */
   int nVectors;
-  numeric_t *codeDist;		/* Optional -- distance to each code at each position */
+  numeric_t *codeDist;      /* Optional -- distance to each code at each position */
 
   /* constraint profile */
   int *nOn;
@@ -596,12 +596,12 @@ typedef struct {
 */
 typedef struct {
   int i, j;
-  numeric_t weight;			/* Total product of weights (maximum value is nPos)
-				   This is needed for weighted joins and for pseudocounts,
-				   but not in most other places.
-				   For example, it is not maintained by the top hits code */
-  numeric_t dist;			/* The uncorrected distance (includes diameter correction) */
-  numeric_t criterion;		/* changes when we update the out-profile or change nActive */
+  numeric_t weight;         /* Total product of weights (maximum value is nPos)
+                               This is needed for weighted joins and for pseudocounts,
+                               but not in most other places.
+                               For example, it is not maintained by the top hits code */
+  numeric_t dist;           /* The uncorrected distance (includes diameter correction) */
+  numeric_t criterion;      /* changes when we update the out-profile or change nActive */
 } besthit_t;
 
 typedef struct {
@@ -618,13 +618,13 @@ typedef struct {
      O(alphabet) not O(alphabet*alphabet) time.
   */
   numeric_t eigeninv[MAXCODES][MAXCODES];
-  numeric_t eigenval[MAXCODES];	/* eigenvalues */
+  numeric_t eigenval[MAXCODES];            /* eigenvalues */
 
 
   /* eigentot=eigeninv times the all-1s frequency vector
      useful for normalizing rotated frequency vectors
   */
-  numeric_t eigentot[MAXCODES];	
+  numeric_t eigentot[MAXCODES];
 
   /* codeFreq is the transpose of the eigeninv matrix is
      the rotated frequency vector for each code */
@@ -684,32 +684,32 @@ typedef struct {
    = codeFreq(A) * w/stat(A) + nearFreq(A) * (1-w)
  */
 typedef struct {
-  numeric_t stat[MAXCODES]; /* The stationary distribution */
-  numeric_t statinv[MAXCODES];	/* 1/stat */
+  numeric_t stat[MAXCODES];                /* The stationary distribution */
+  numeric_t statinv[MAXCODES];             /* 1/stat */
   /* the eigenmatrix, with the eigenvectors as columns and rotations of individual
      characters as rows. Also includes a NOCODE entry for gaps */
   numeric_t codeFreq[NOCODE+1][MAXCODES];
-  numeric_t eigeninv[MAXCODES][MAXCODES]; /* Inverse of eigenmatrix */
+  numeric_t eigeninv[MAXCODES][MAXCODES];  /* Inverse of eigenmatrix */
   numeric_t eigeninvT[MAXCODES][MAXCODES]; /* transpose of eigeninv */
-  numeric_t eigenval[MAXCODES];	/* Eigenvalues  */
+  numeric_t eigenval[MAXCODES];            /* Eigenvalues  */
   /* These are for approximate posteriors (off by default) */
-  numeric_t nearP[MAXCODES][MAXCODES]; /* nearP[i][j] = P(parent=j | both children are i, both lengths are 0.1 */
-  numeric_t nearFreq[MAXCODES][MAXCODES]; /* rotation of nearP/stat */
+  numeric_t nearP[MAXCODES][MAXCODES];     /* nearP[i][j] = P(parent=j | both children are i, both lengths are 0.1 */
+  numeric_t nearFreq[MAXCODES][MAXCODES];  /* rotation of nearP/stat */
 } transition_matrix_t;
 
 typedef struct {
   int nRateCategories;
-  numeric_t *rates;			/* 1 per rate category */
-  unsigned int *ratecat;	/* 1 category per position */
+  numeric_t *rates;         /* 1 per rate category */
+  unsigned int *ratecat;    /* 1 category per position */
 } rates_t;
 
 typedef struct {
   /* The input */
   int nSeq;
   int nPos;
-  char **seqs;			/* the aligment sequences array (not reallocated) */
+  char **seqs;                        /* the aligment sequences array (not reallocated) */
   distance_matrix_t *distance_matrix; /* a pointer (not reallocated), or NULL if using %identity distance */
-  transition_matrix_t *transmat; /* a pointer (is allocated), or NULL for Jukes-Cantor */
+  transition_matrix_t *transmat;      /* a pointer (is allocated), or NULL for Jukes-Cantor */
   /* Topological constraints are represented for each sequence as binary characters
      with values of '0', '1', or '-' (for missing data)
      Sequences that have no constraint may have a NULL string
@@ -718,13 +718,13 @@ typedef struct {
   char **constraintSeqs;
 
   /* The profile data structures */
-  int maxnode;			/* The next index to allocate */
-  int maxnodes;			/* Space allocated in data structures below */
-  profile_t **profiles;         /* Profiles of leaves and intermediate nodes */
-  numeric_t *diameter;		/* To correct for distance "up" from children (if any) */
-  numeric_t *varDiameter;		/* To correct variances for distance "up" */
-  numeric_t *selfdist;		/* Saved for use in some formulas */
-  numeric_t *selfweight;		/* Saved for use in some formulas */
+  int maxnode;                        /* The next index to allocate */
+  int maxnodes;                       /* Space allocated in data structures below */
+  profile_t **profiles;               /* Profiles of leaves and intermediate nodes */
+  numeric_t *diameter;                /* To correct for distance "up" from children (if any) */
+  numeric_t *varDiameter;             /* To correct variances for distance "up" */
+  numeric_t *selfdist;                /* Saved for use in some formulas */
+  numeric_t *selfweight;              /* Saved for use in some formulas */
 
   /* Average profile of all active nodes, the "outprofile"
    * If all inputs are ungapped, this has weight 1 (not nSequences) at each position
@@ -734,15 +734,15 @@ typedef struct {
   double totdiam;
 
   /* We sometimes use stale out-distances, so we remember what nActive was  */
-  numeric_t *outDistances;		/* Sum of distances to other active (parent==-1) nodes */
-  int *nOutDistActive;		/* What nActive was when this outDistance was computed */
+  numeric_t *outDistances;            /* Sum of distances to other active (parent==-1) nodes */
+  int *nOutDistActive;                /* What nActive was when this outDistance was computed */
 
   /* the inferred tree */
-  int root;			/* index of the root. Unlike other internal nodes, it has 3 children */
-  int *parent;			/* -1 or index of parent */
+  int root;                           /* index of the root. Unlike other internal nodes, it has 3 children */
+  int *parent;                        /* -1 or index of parent */
   children_t *child;
-  numeric_t *branchlength;		/* Distance to parent */
-  numeric_t *support;		/* 1 for high-confidence nodes */
+  numeric_t *branchlength;            /* Distance to parent */
+  numeric_t *support;                 /* 1 for high-confidence nodes */
 
   /* auxilliary data for maximum likelihood (defaults to 1 category of rate=1.0) */
   rates_t rates;
@@ -754,10 +754,10 @@ typedef struct {
 typedef struct {
   int nSeq;
   int nUnique;
-  int *uniqueFirst;		/* iUnique -> iAln */
-  int *alnNext;			/* iAln -> next, or -1  */
-  int *alnToUniq;		/* iAln -> iUnique, or -1 if another was the exemplar */
-  char **uniqueSeq;		/* indexed by iUniq -- points to strings allocated elsewhere */
+  int *uniqueFirst;     /* iUnique -> iAln */
+  int *alnNext;         /* iAln -> next, or -1  */
+  int *alnToUniq;       /* iAln -> iUnique, or -1 if another was the exemplar */
+  char **uniqueSeq;     /* indexed by iUniq -- points to strings allocated elsewhere */
 } uniquify_t;
 
 /* Describes which switch to do */
@@ -768,7 +768,7 @@ typedef enum {ABvsCD,ACvsBD,ADvsBC} nni_t;
 */
 typedef struct {
   int nodes[2];
-  double deltaLength;		/* change in tree length for this step (lower is better) */
+  double deltaLength;   /* change in tree length for this step (lower is better) */
 } spr_step_t;
 
 /* Keep track of hits for the top-hits heuristic without wasting memory
@@ -781,18 +781,18 @@ typedef struct {
 } hit_t;
 
 typedef struct {
-  int nHits;			/* the allocated and desired size; some of them may be empty */
+  int nHits;            /* the allocated and desired size; some of them may be empty */
   hit_t *hits;
-  int hitSource;		/* where to refresh hits from if a 2nd-level top-hit list, or -1 */
-  int age;			/* number of joins since a refresh */
+  int hitSource;        /* where to refresh hits from if a 2nd-level top-hit list, or -1 */
+  int age;              /* number of joins since a refresh */
 } top_hits_list_t;
 
 typedef struct {
-  int m;			 /* size of a full top hits list, usually sqrt(N) */
-  int q;			 /* size of a 2nd-level top hits, usually sqrt(m) */
+  int m;                           /* size of a full top hits list, usually sqrt(N) */
+  int q;                           /* size of a 2nd-level top hits, usually sqrt(m) */
   int maxnodes;
   top_hits_list_t *top_hits_lists; /* one per node */
-  hit_t *visible;		/* the "visible" (very best) hit for each node */
+  hit_t *visible;                  /* the "visible" (very best) hit for each node */
 
   /* The top-visible set is a subset, usually of size m, of the visible set --
      it is the set of joins to select from
@@ -802,10 +802,10 @@ typedef struct {
      which ensures that none of the topvisible set are stale (that is, they
      all point to an active node).
   */
-  int nTopVisible;		/* nTopVisible = m * topvisibleMult */
+  int nTopVisible;                 /* nTopVisible = m * topvisibleMult */
   int *topvisible;
 
-  int topvisibleAge;		/* joins since the top-visible list was recomputed */
+  int topvisibleAge;               /* joins since the top-visible list was recomputed */
 
 #ifdef OPENMP
   /* 1 lock to read or write any top hits list, no thread grabs more than one */
@@ -819,39 +819,39 @@ int verbose = 1;
 int showProgress = 1;
 int slow = 0;
 int fastest = 0;
-bool useTopHits2nd = false;	/* use the second-level top hits heuristic? */
+bool useTopHits2nd = false;     /* use the second-level top hits heuristic? */
 int bionj = 0;
-double tophitsMult = 1.0;	/* 0 means compare nodes to all other nodes */
-double tophitsClose = -1.0;	/* Parameter for how close is close; also used as a coverage req. */
-double topvisibleMult = 1.5;	/* nTopVisible = m * topvisibleMult; 1 or 2 did not make much difference
-				   in either running time or accuracy so I chose a compromise. */
+double tophitsMult = 1.0;       /* 0 means compare nodes to all other nodes */
+double tophitsClose = -1.0;     /* Parameter for how close is close; also used as a coverage req. */
+double topvisibleMult = 1.5;    /* nTopVisible = m * topvisibleMult; 1 or 2 did not make much difference
+                                   in either running time or accuracy so I chose a compromise. */
 
-double tophitsRefresh = 0.8;	/* Refresh if fraction of top-hit-length drops to this */
-double tophits2Mult = 1.0;	/* Second-level top heuristic -- only with -fastest */
-int tophits2Safety = 3;		/* Safety factor for second level of top-hits heuristic */
-double tophits2Refresh = 0.6;	/* Refresh 2nd-level top hits if drops down to this fraction of length */
+double tophitsRefresh = 0.8;    /* Refresh if fraction of top-hit-length drops to this */
+double tophits2Mult = 1.0;      /* Second-level top heuristic -- only with -fastest */
+int tophits2Safety = 3;         /* Safety factor for second level of top-hits heuristic */
+double tophits2Refresh = 0.6;   /* Refresh 2nd-level top hits if drops down to this fraction of length */
 
-double staleOutLimit = 0.01;	/* nActive changes by at most this amount before we recompute 
-				   an out-distance. (Only applies if using the top-hits heuristic) */
-double fResetOutProfile = 0.02;	/* Recompute out profile from scratch if nActive has changed
-				   by more than this proportion, and */
-int nResetOutProfile = 200;	/* nActive has also changed more than this amount */
-int nCodes=20;			/* 20 if protein, 4 if nucleotide */
-bool useMatrix=true;		/* If false, use %different as the uncorrected distance */
-bool logdist = true;		/* If true, do a log-correction (scoredist-like or Jukes-Cantor)
-				   but only during NNIs and support values, not during neighbor-joining */
+double staleOutLimit = 0.01;    /* nActive changes by at most this amount before we recompute 
+                                   an out-distance. (Only applies if using the top-hits heuristic) */
+double fResetOutProfile = 0.02; /* Recompute out profile from scratch if nActive has changed
+                                   by more than this proportion, and */
+int nResetOutProfile = 200;     /* nActive has also changed more than this amount */
+int nCodes=20;                  /* 20 if protein, 4 if nucleotide */
+bool useMatrix=true;            /* If false, use %different as the uncorrected distance */
+bool logdist = true;            /* If true, do a log-correction (scoredist-like or Jukes-Cantor)
+                                   but only during NNIs and support values, not during neighbor-joining */
 double pseudoWeight = 0.0;      /* The weight of pseudocounts to avoid artificial long branches when
-				   nearby sequences in the tree have little or no overlap
-				   (off by default). The prior distance is based on
-				   all overlapping positions among the quartet or triplet under
-				   consideration. The log correction takes place after the
-				   pseudocount is used. */
+                                   nearby sequences in the tree have little or no overlap
+                                   (off by default). The prior distance is based on
+                                   all overlapping positions among the quartet or triplet under
+                                   consideration. The log correction takes place after the
+                                   pseudocount is used. */
 double constraintWeight = 100.0;/* Cost of violation of a topological constraint in evolutionary distance
-				   or likelihood */
-double MEMinDelta = 1.0e-4;	/* Changes of less than this in tree-length are discounted for
-				   purposes of identifying fixed subtrees */
+                                   or likelihood */
+double MEMinDelta = 1.0e-4;     /* Changes of less than this in tree-length are discounted for
+                                   purposes of identifying fixed subtrees */
 bool fastNNI = true;
-bool gammaLogLk = false;	/* compute gamma likelihood without reoptimizing branch lengths? */
+bool gammaLogLk = false;        /* compute gamma likelihood without reoptimizing branch lengths? */
 
 /* Maximum likelihood options and constants */
 /* These are used to rescale likelihood values and avoid taking a logarithm at each position */
@@ -868,10 +868,10 @@ const double Log2 = 0.693147180559945;
 */
 #ifndef USE_DOUBLE
 const double MLMinBranchLengthTolerance = 1.0e-4; /* absolute tolerance for optimizing branch lengths */
-const double MLFTolBranchLength = 0.001; /* fractional tolerance for optimizing branch lengths */
-const double MLMinBranchLength = 5.0e-4; /* minimum value for branch length */
-const double MLMinRelBranchLength = 2.5e-4; /* minimum of rate * length */
-const double fPostTotalTolerance = 1.0e-10; /* posterior vector must sum to at least this before rescaling */
+const double MLFTolBranchLength = 0.001;          /* fractional tolerance for optimizing branch lengths */
+const double MLMinBranchLength = 5.0e-4;          /* minimum value for branch length */
+const double MLMinRelBranchLength = 2.5e-4;       /* minimum of rate * length */
+const double fPostTotalTolerance = 1.0e-10;       /* posterior vector must sum to at least this before rescaling */
 #else
 const double MLMinBranchLengthTolerance = 1.0e-9;
 const double MLFTolBranchLength = 0.001;
@@ -880,44 +880,44 @@ const double MLMinRelBranchLength = 2.5e-9;
 const double fPostTotalTolerance = 1.0e-20;
 #endif
 
-int mlAccuracy = 1;		/* Rounds of optimization of branch lengths; 1 means do 2nd round only if close */
-double closeLogLkLimit = 5.0;	/* If partial optimization of an NNI looks like it would decrease the log likelihood
-				   by this much or more then do not optimize it further */
-double treeLogLkDelta = 0.1;	/* Give up if tree log-lk changes by less than this; NNIs that change
-				   likelihood by less than this also are considered unimportant
-				   by some heuristics */
-bool exactML = true;		/* Exact or approximate posterior distributions for a.a.s */
-double approxMLminf = 0.95;	/* Only try to approximate posterior distributions if max. value is at least this high */
-double approxMLminratio = 2/3.0;/* Ratio of approximated/true posterior values must be at least this high */
-double approxMLnearT = 0.2;	/* 2nd component of near-constant posterior distribution uses this time scale */
+int mlAccuracy = 1;              /* Rounds of optimization of branch lengths; 1 means do 2nd round only if close */
+double closeLogLkLimit = 5.0;    /* If partial optimization of an NNI looks like it would decrease the log likelihood
+                                    by this much or more then do not optimize it further */
+double treeLogLkDelta = 0.1;     /* Give up if tree log-lk changes by less than this; NNIs that change
+                                    likelihood by less than this also are considered unimportant
+                                    by some heuristics */
+bool exactML = true;             /* Exact or approximate posterior distributions for a.a.s */
+double approxMLminf = 0.95;      /* Only try to approximate posterior distributions if max. value is at least this high */
+double approxMLminratio = 2/3.0; /* Ratio of approximated/true posterior values must be at least this high */
+double approxMLnearT = 0.2;      /* 2nd component of near-constant posterior distribution uses this time scale */
 const int nDefaultRateCats = 20;
 
 /* Performance and memory usage */
-long profileOps = 0;		/* Full profile-based distance operations */
-long outprofileOps = 0;		/* How many of profileOps are comparisons to outprofile */
-long seqOps = 0;		/* Faster leaf-based distance operations */
-long profileAvgOps = 0;		/* Number of profile-average steps */
-long nHillBetter = 0;		/* Number of hill-climbing steps */
-long nCloseUsed = 0;		/* Number of "close" neighbors we avoid full search for */
-long nClose2Used = 0;		/* Number of "close" neighbors we use 2nd-level top hits for */
-long nRefreshTopHits = 0;	/* Number of full-blown searches (interior nodes) */
-long nVisibleUpdate = 0;		/* Number of updates of the visible set */
-long nNNI = 0;			/* Number of NNI changes performed */
-long nSPR = 0;			/* Number of SPR changes performed */
-long nML_NNI = 0;		/* Number of max-lik. NNI changes performed */
-long nSuboptimalSplits = 0;	/* # of splits that are rejected given final tree (during bootstrap) */
+long profileOps = 0;             /* Full profile-based distance operations */
+long outprofileOps = 0;          /* How many of profileOps are comparisons to outprofile */
+long seqOps = 0;                 /* Faster leaf-based distance operations */
+long profileAvgOps = 0;          /* Number of profile-average steps */
+long nHillBetter = 0;            /* Number of hill-climbing steps */
+long nCloseUsed = 0;             /* Number of "close" neighbors we avoid full search for */
+long nClose2Used = 0;            /* Number of "close" neighbors we use 2nd-level top hits for */
+long nRefreshTopHits = 0;        /* Number of full-blown searches (interior nodes) */
+long nVisibleUpdate = 0;         /* Number of updates of the visible set */
+long nNNI = 0;                   /* Number of NNI changes performed */
+long nSPR = 0;                   /* Number of SPR changes performed */
+long nML_NNI = 0;                /* Number of max-lik. NNI changes performed */
+long nSuboptimalSplits = 0;      /* # of splits that are rejected given final tree (during bootstrap) */
 long nSuboptimalConstrained = 0; /* Bad splits that are due to constraints */
-long nConstraintViolations = 0;	/* Number of constraint violations */
+long nConstraintViolations = 0;  /* Number of constraint violations */
 long nProfileFreqAlloc = 0;
 long nProfileFreqAvoid = 0;
 long szAllAlloc = 0;
-long mymallocUsed = 0;		/* useful allocations by mymalloc */
-long maxmallocHeap = 0;		/* Maximum of mi.arena+mi.hblkhd from mallinfo (actual mem usage) */
-long nLkCompute = 0;		/* # of likelihood computations for pairs of probability vectors */
-long nPosteriorCompute = 0;	/* # of computations of posterior probabilities */
-long nAAPosteriorExact = 0;	/* # of times compute exact AA posterior */
-long nAAPosteriorRough = 0;	/* # of times use rough approximation */
-long nStarTests = 0;		/* # of times we use star test to avoid testing an NNI */
+long mymallocUsed = 0;           /* useful allocations by mymalloc */
+long maxmallocHeap = 0;          /* Maximum of mi.arena+mi.hblkhd from mallinfo (actual mem usage) */
+long nLkCompute = 0;             /* # of likelihood computations for pairs of probability vectors */
+long nPosteriorCompute = 0;      /* # of computations of posterior probabilities */
+long nAAPosteriorExact = 0;      /* # of times compute exact AA posterior */
+long nAAPosteriorRough = 0;      /* # of times use rough approximation */
+long nStarTests = 0;             /* # of times we use star test to avoid testing an NNI */
 
 /* Protein character set */
 unsigned char *codesStringAA = (unsigned char*) "ARNDCQEGHILKMFPSTWYV";
@@ -936,7 +936,7 @@ void FreeAlignmentSeqs(/*IN/OUT*/alignment_t *);
    This routine takes care of setting the diagonals
 */
 transition_matrix_t *CreateTransitionMatrix(/*IN*/double matrix[MAXCODES][MAXCODES],
-					    /*IN*/double stat[MAXCODES]);
+                                            /*IN*/double stat[MAXCODES]);
 transition_matrix_t *CreateGTR(double *gtrrates/*ac,ag,at,cg,ct,gt*/, double *gtrfreq/*ACGT*/);
 transition_matrix_t *ReadAATransitionMatrix(/*IN*/char *filename);
 
@@ -945,9 +945,9 @@ distance_matrix_t *TransMatToDistanceMat(transition_matrix_t *transmat);
 
 /* Allocates memory, initializes leaf profiles */
 NJ_t *InitNJ(char **sequences, int nSeqs, int nPos,
-	     /*IN OPTIONAL*/char **constraintSeqs, int nConstraints,
-	     /*IN OPTIONAL*/distance_matrix_t *,
-	     /*IN OPTIONAL*/transition_matrix_t *);
+             /*IN OPTIONAL*/char **constraintSeqs, int nConstraints,
+             /*IN OPTIONAL*/distance_matrix_t *,
+             /*IN OPTIONAL*/transition_matrix_t *);
 
 NJ_t *FreeNJ(NJ_t *NJ); /* returns NULL */
 void FastNJ(/*IN/OUT*/NJ_t *NJ); /* Does the joins */
@@ -957,9 +957,9 @@ void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ, int nBootstrap);	  /* Estimates the relia
    will just be high (for age) or 0 (for delta)
 */
 typedef struct {
-  int age;	    /* number of rounds since this node was modified by an NNI */
+  int age;          /* number of rounds since this node was modified by an NNI */
   int subtreeAge;   /* number of rounds since self or descendent had a significant improvement */
-  double delta;	    /* improvement in score for this node (or 0 if no change) */
+  double delta;     /* improvement in score for this node (or 0 if no change) */
   double support;   /* improvement of score for self over better of alternatives */
 } nni_stats_t;
 
@@ -970,8 +970,8 @@ typedef struct {
    Returns the # of topological changes performed
 */
 int NNI(/*IN/OUT*/NJ_t *NJ, int iRound, int nRounds, bool useML,
-	/*IN/OUT*/nni_stats_t *stats,
-	/*OUT*/double *maxDeltaCriterion);
+        /*IN/OUT*/nni_stats_t *stats,
+        /*OUT*/double *maxDeltaCriterion);
 nni_stats_t *InitNNIStats(NJ_t *NJ);
 nni_stats_t *FreeNNIStats(nni_stats_t *, NJ_t *NJ);	/* returns NULL */
 
@@ -1376,7 +1376,7 @@ typedef struct {
   int nPos;
   transition_matrix_t *transmat;
   rates_t *rates;
-  int nEval;			/* number of likelihood evaluations */
+  int nEval;                 /* number of likelihood evaluations */
   /* The pair to optimize */
   profile_t *pair1;
   profile_t *pair2;
@@ -1388,7 +1388,7 @@ typedef struct {
   NJ_t *NJ;
   double freq[4];
   double rates[6];
-  int iRate;			/* which rate to set x from */
+  int iRate;                 /* which rate to set x from */
   FILE *fpLog; /* OPTIONAL WRITE */
 } gtr_opt_t;
 
@@ -1527,14 +1527,14 @@ void tqli(double *d, double *e, int n, int np, double *z);
 void *mymemdup(void *data, size_t sz);
 void *myrealloc(void *data, size_t szOld, size_t szNew, bool bCopy);
 
-double pnorm(double z);		/* Probability(value <=z)  */
+double pnorm(double z);     /* Probability(value <=z)  */
 
 /* Hashtable functions */
 typedef struct
 {
   char *string;
-  int nCount;			/* number of times this entry was seen */
-  int first;			/* index of first entry with this value */
+  int nCount;               /* number of times this entry was seen */
+  int first;                /* index of first entry with this value */
 } hashbucket_t;
 
 typedef struct {
@@ -1662,13 +1662,13 @@ int main(int argc, char **argv) {
   bool make_matrix = false;
   char *constraintsFile = NULL;
   char *intreeFile = NULL;
-  bool intree1 = false;		/* the same starting tree each round */
-  int nni = -1;			/* number of rounds of NNI, defaults to 4*log2(n) */
-  int spr = 2;			/* number of rounds of SPR */
-  int maxSPRLength = 10;	/* maximum distance to move a node */
-  int MLnni = -1;		/* number of rounds of ML NNI, defaults to 2*log2(n) */
-  bool MLlen = false;		/* optimize branch lengths; no topology changes */
-  int nBootstrap = 1000;		/* If set, number of replicates of local bootstrap to do */
+  bool intree1 = false;              /* the same starting tree each round */
+  int nni = -1;                      /* number of rounds of NNI, defaults to 4*log2(n) */
+  int spr = 2;                       /* number of rounds of SPR */
+  int maxSPRLength = 10;             /* maximum distance to move a node */
+  int MLnni = -1;                    /* number of rounds of ML NNI, defaults to 2*log2(n) */
+  bool MLlen = false;                /* optimize branch lengths; no topology changes */
+  int nBootstrap = 1000;             /* If set, number of replicates of local bootstrap to do */
   int nRateCats = nDefaultRateCats;
   char *logfile = NULL;
   bool bUseGtr = false;
