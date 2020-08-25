@@ -788,12 +788,17 @@ typedef struct {
 } top_hits_list_t;
 
 typedef struct {
-  int m;                           /* size of a full top hits list, usually sqrt(N) */
-  int q;                           /* size of a 2nd-level top hits, usually sqrt(m) */
-  int maxnodes;
+  /* Reorder the member variables by size to avoid losing memory to padding bytes
+   * First the pointers (8 bytes in a 64 bit program)
+   * Then the ints (4 bytes)
+   * This reduces the size of this struct from 56 bytes to 48 bytes, the minimum
+   */
+#ifdef OPENMP
+  /* 1 lock to read or write any top hits list, no thread grabs more than one */
+  omp_lock_t *locks;
+#endif
   top_hits_list_t *top_hits_lists; /* one per node */
   hit_t *visible;                  /* the "visible" (very best) hit for each node */
-
   /* The top-visible set is a subset, usually of size m, of the visible set --
      it is the set of joins to select from
      Each entry is either a node whose visible set entry has a good (low) criterion,
@@ -802,15 +807,15 @@ typedef struct {
      which ensures that none of the topvisible set are stale (that is, they
      all point to an active node).
   */
-  int nTopVisible;                 /* nTopVisible = m * topvisibleMult */
   int *topvisible;
+  int nTopVisible;                 /* nTopVisible = m * topvisibleMult */
 
   int topvisibleAge;               /* joins since the top-visible list was recomputed */
 
-#ifdef OPENMP
-  /* 1 lock to read or write any top hits list, no thread grabs more than one */
-  omp_lock_t *locks;
-#endif
+  int m;                           /* size of a full top hits list, usually sqrt(N) */
+  int q;                           /* size of a 2nd-level top hits, usually sqrt(m) */
+  int maxnodes;
+
 } top_hits_t;
 
 /* Global variables */
