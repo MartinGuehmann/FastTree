@@ -704,9 +704,8 @@ typedef struct {
 } rates_t;
 
 typedef struct {
+  /* 184 of 184 bytes used, no padding bytes here */
   /* The input */
-  int nSeq;
-  int nPos;
   char **seqs;                        /* the aligment sequences array (not reallocated) */
   distance_matrix_t *distance_matrix; /* a pointer (not reallocated), or NULL if using %identity distance */
   transition_matrix_t *transmat;      /* a pointer (is allocated), or NULL for Jukes-Cantor */
@@ -714,12 +713,9 @@ typedef struct {
      with values of '0', '1', or '-' (for missing data)
      Sequences that have no constraint may have a NULL string
   */
-  int nConstraints;
   char **constraintSeqs;
 
   /* The profile data structures */
-  int maxnode;                        /* The next index to allocate */
-  int maxnodes;                       /* Space allocated in data structures below */
   profile_t **profiles;               /* Profiles of leaves and intermediate nodes */
   numeric_t *diameter;                /* To correct for distance "up" from children (if any) */
   numeric_t *varDiameter;             /* To correct variances for distance "up" */
@@ -738,7 +734,6 @@ typedef struct {
   int *nOutDistActive;                /* What nActive was when this outDistance was computed */
 
   /* the inferred tree */
-  int root;                           /* index of the root. Unlike other internal nodes, it has 3 children */
   int *parent;                        /* -1 or index of parent */
   children_t *child;
   numeric_t *branchlength;            /* Distance to parent */
@@ -746,6 +741,20 @@ typedef struct {
 
   /* auxilliary data for maximum likelihood (defaults to 1 category of rate=1.0) */
   rates_t rates;
+
+  /* Minimize memory use by reducing patting */
+  /* So put the 4 bytes ints last. */
+  /* The input */
+  int nSeq;
+  int nPos;
+  /* Topological constraints */
+  int nConstraints;
+  /* The profile data structures */
+  int maxnode;                        /* The next index to allocate */
+  int maxnodes;                       /* Space allocated in data structures below */
+  /* the inferred tree */
+  int root;                           /* index of the root. Unlike other internal nodes, it has 3 children */
+
 } NJ_t;
 
 /* Uniquify sequences in an alignment -- map from indices
