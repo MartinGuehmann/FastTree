@@ -550,10 +550,11 @@ char *expertUsage =
 #define MAX(X,Y) ((X) >  (Y) ? (X) : (Y))
 
 typedef struct {
-  int nPos;
-  int nSeq;
+  /* 28 of 32 bytes used, 4 empty padding bytes */
   char **names;
   char **seqs;
+  int nPos;
+  int nSeq;
   int nSaved; /* actual allocated size of names and seqs */
 } alignment_t;
 
@@ -571,16 +572,18 @@ typedef struct {
    If not using constraints, those will be NULL
 */
 typedef struct {
-  /* alignment profile */
-  numeric_t *weights;
-  unsigned char *codes;
-  numeric_t *vectors;       /* NULL if no non-constant positions, e.g. for leaves */
-  int nVectors;
-  numeric_t *codeDist;      /* Optional -- distance to each code at each position */
-
+  /* 52 of 56 bytes used, 4 empty padding bytes */
   /* constraint profile */
   int *nOn;
   int *nOff;
+
+  /* alignment profile */
+  numeric_t *weights;
+  unsigned char *codes;
+  numeric_t *codeDist;      /* Optional -- distance to each code at each position */
+  numeric_t *vectors;       /* NULL if no non-constant positions, e.g. for leaves */
+  int nVectors;
+
 } profile_t;
 
 /* A visible node is a pair of nodes i, j such that j is the best hit of i,
@@ -595,6 +598,7 @@ typedef struct {
    we store invalid entries with i=j=-1 and dist/criterion very high.
 */
 typedef struct {
+  /* 20 of 20 bytes used, no padding bytes here */
   int i, j;
   numeric_t weight;         /* Total product of weights (maximum value is nPos)
                                This is needed for weighted joins and for pseudocounts,
@@ -605,13 +609,16 @@ typedef struct {
 } besthit_t;
 
 typedef struct {
+  /* 16 of 16 bytes used, no padding bytes here */
   int nChild;
   int child[3];
 } children_t;
 
 typedef struct {
+  /* 5040 of 5040 bytes used, no padding bytes here */
+  /* MAXCODES == 20 */
   /* Distances between amino acids */
-  numeric_t distances[MAXCODES][MAXCODES];
+  numeric_t distances[MAXCODES][MAXCODES]; /* 20*20*4 = 1600 bytes*/
 
   /* Inverse of the eigenvalue matrix, for rotating a frequency vector
      into eigenspace so that profile similarity computations are
@@ -684,11 +691,12 @@ typedef struct {
    = codeFreq(A) * w/stat(A) + nearFreq(A) * (1-w)
  */
 typedef struct {
+  /* 16880 of 16880 bytes used, no padding bytes here */
   numeric_t stat[MAXCODES];                /* The stationary distribution */
   numeric_t statinv[MAXCODES];             /* 1/stat */
   /* the eigenmatrix, with the eigenvectors as columns and rotations of individual
      characters as rows. Also includes a NOCODE entry for gaps */
-  numeric_t codeFreq[NOCODE+1][MAXCODES];
+  numeric_t codeFreq[NOCODE+1][MAXCODES];  /* 128*20*4 = 10240 bytes*/
   numeric_t eigeninv[MAXCODES][MAXCODES];  /* Inverse of eigenmatrix */
   numeric_t eigeninvT[MAXCODES][MAXCODES]; /* transpose of eigeninv */
   numeric_t eigenval[MAXCODES];            /* Eigenvalues  */
@@ -698,9 +706,10 @@ typedef struct {
 } transition_matrix_t;
 
 typedef struct {
-  int nRateCategories;
+  /* 20 of 24 bytes used, 4 empty padding bytes */
   numeric_t *rates;         /* 1 per rate category */
   unsigned int *ratecat;    /* 1 category per position */
+  int nRateCategories;
 } rates_t;
 
 typedef struct {
@@ -761,6 +770,7 @@ typedef struct {
    in the alignment to unique indicies in a NJ_t
 */
 typedef struct {
+  /* 40 of 40 bytes used, no padding bytes here */
   int nSeq;
   int nUnique;
   int *uniqueFirst;     /* iUnique -> iAln */
@@ -776,6 +786,7 @@ typedef enum {ABvsCD,ACvsBD,ADvsBC} nni_t;
    making up, in total, an SPR move
 */
 typedef struct {
+  /* 16 of 16 bytes used, no padding bytes here */
   int nodes[2];
   double deltaLength;   /* change in tree length for this step (lower is better) */
 } spr_step_t;
@@ -785,18 +796,21 @@ typedef struct {
    If j is an inactive node, this may be replaced by that node's parent (and dist recomputed)
  */
 typedef struct {
-  int j;
+  /* 8 of 8 bytes used, no padding bytes here */
   numeric_t dist;
+  int j;
 } hit_t;
 
 typedef struct {
-  int nHits;            /* the allocated and desired size; some of them may be empty */
+  /* 20 of 24 bytes used, 4 padding bytes here */
   hit_t *hits;
+  int nHits;            /* the allocated and desired size; some of them may be empty */
   int hitSource;        /* where to refresh hits from if a 2nd-level top-hit list, or -1 */
   int age;              /* number of joins since a refresh */
 } top_hits_list_t;
 
 typedef struct {
+  /* 48 of 48 bytes used, no padding bytes here */
   /* Reorder the member variables by size to avoid losing memory to padding bytes
    * First the pointers (8 bytes in a 64 bit program)
    * Then the ints (4 bytes)
@@ -971,6 +985,7 @@ void ReliabilityNJ(/*IN/OUT*/NJ_t *NJ, int nBootstrap);	  /* Estimates the relia
    will just be high (for age) or 0 (for delta)
 */
 typedef struct {
+  /* 24 of 24 bytes used, no padding bytes here */
   int age;          /* number of rounds since this node was modified by an NNI */
   int subtreeAge;   /* number of rounds since self or descendent had a significant improvement */
   double delta;     /* improvement in score for this node (or 0 if no change) */
@@ -999,6 +1014,7 @@ void UpdateBranchLengths(/*IN/OUT*/NJ_t *NJ);
 double TreeLength(/*IN/OUT*/NJ_t *NJ, bool recomputeProfiles);
 
 typedef struct {
+  /* 32 of 32 bytes used, no padding bytes here */
   int nBadSplits;
   int nConstraintViolations;
   int nBadBoth;
@@ -1100,7 +1116,7 @@ void SeqDist(unsigned char *codes1, unsigned char *codes2, int nPos,
    The lower index is compared to the higher index, e.g. for profiles
    A,B,C,D the comparison will be as in quartet_pair_t
 */
-typedef enum {qAB,qAC,qAD,qBC,qBD,qCD} quartet_pair_t;
+typedef enum {qAB,qAC,qAD,qBC,qBD,qCD} quartet_pair_t; /* Only indices should not be a problem if they are 4 bytes instead of 1 */
 void CorrectedPairDistances(profile_t **profiles, int nProfiles,
 			    /*OPTIONAL*/distance_matrix_t *distance_matrix,
 			    int nPos,
@@ -1348,7 +1364,8 @@ numeric_t *MLSiteRates(int nRateCategories);
 double *MLSiteLikelihoodsByRate(/*IN*/NJ_t *NJ, /*IN*/numeric_t *rates, int nRateCategories);
 
 typedef struct {
-  double mult;			/* multiplier for the rates / divisor for the tree-length */
+  /* 40 of 40 bytes used, no padding bytes here */
+  double mult;              /* multiplier for the rates / divisor for the tree-length */
   double alpha;
   int nPos;
   int nRateCats;
@@ -1387,6 +1404,8 @@ double PairLogLk(/*IN*/profile_t *p1, /*IN*/profile_t *p2, double length,
 typedef enum {LEN_A,LEN_B,LEN_C,LEN_D,LEN_I} quartet_length_t;
 
 typedef struct {
+  // ToDo
+  /* 40 of 48 bytes used, 8 padding bytes here */
   int nPos;
   transition_matrix_t *transmat;
   rates_t *rates;
@@ -1399,11 +1418,12 @@ typedef struct {
 double PairNegLogLk(double x, void *data); /* data must be a quartet_opt_t */
 
 typedef struct {
+  /* 100 of 104 bytes used, 4 padding bytes here */
   NJ_t *NJ;
   double freq[4];
   double rates[6];
   int iRate;                 /* which rate to set x from */
-  FILE *fpLog; /* OPTIONAL WRITE */
+  FILE *fpLog;               /* OPTIONAL WRITE */
 } gtr_opt_t;
 
 /* Returns -log_likelihood for the tree with the given rates
@@ -1546,15 +1566,17 @@ double pnorm(double z);     /* Probability(value <=z)  */
 /* Hashtable functions */
 typedef struct
 {
+  /* 16 of 16 bytes used, no padding bytes here */
   char *string;
   int nCount;               /* number of times this entry was seen */
   int first;                /* index of first entry with this value */
 } hashbucket_t;
 
 typedef struct {
-  int nBuckets;
+  /* 12 of 16 bytes used, 4 padding bytes here */
   /* hashvalue -> bucket. Or look in bucket + 1, +2, etc., till you hit a NULL string */
   hashbucket_t *buckets;
+  int nBuckets;
 } hashstrings_t;
 typedef int hashiterator_t;
 
