@@ -1407,9 +1407,9 @@ typedef struct {
   // ToDo
   /* 40 of 48 bytes used, 8 padding bytes here */
   int nPos;
+  int nEval;                 /* number of likelihood evaluations */
   transition_matrix_t *transmat;
   rates_t *rates;
-  int nEval;                 /* number of likelihood evaluations */
   /* The pair to optimize */
   profile_t *pair1;
   profile_t *pair2;
@@ -5550,8 +5550,8 @@ double MLQuartetOptimize(profile_t *pA, profile_t *pB, profile_t *pC, profile_t 
     if (branch_lengths[j] < MLMinBranchLength)
       branch_lengths[j] = MLMinBranchLength;
   }
-  quartet_opt_t qopt = { nPos, transmat, rates, /*nEval*/0,
-			 /*pair1*/NULL, /*pair2*/NULL };
+  quartet_opt_t qopt = { nPos, /*nEval*/0, transmat, rates,
+                         /*pair1*/NULL, /*pair2*/NULL };
   double f2x, negloglk;
 
   if (pStarTest != NULL)
@@ -6242,8 +6242,8 @@ double RescaleGammaLogLk(int nPos, int nRateCats, /*IN*/numeric_t *rates, /*IN*/
 double MLPairOptimize(profile_t *pA, profile_t *pB,
 		      int nPos, /*OPTIONAL*/transition_matrix_t *transmat, rates_t *rates,
 		      /*IN/OUT*/double *branch_length) {
-  quartet_opt_t qopt = { nPos, transmat, rates,
-			 /*nEval*/0, /*pair1*/pA, /*pair2*/pB };
+  quartet_opt_t qopt = { nPos, /*nEval*/0, transmat, rates,
+                         /*pair1*/pA, /*pair2*/pB };
   double f2x,negloglk;
   *branch_length = onedimenmin(/*xmin*/MLMinBranchLength,
 			       /*xguess*/*branch_length,
